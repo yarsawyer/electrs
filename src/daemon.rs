@@ -12,10 +12,7 @@ use hex;
 use itertools::Itertools;
 use serde_json::{from_str, from_value, Value};
 
-#[cfg(not(feature = "liquid"))]
 use tidecoin::consensus::encode::{deserialize, serialize};
-#[cfg(feature = "liquid")]
-use elements::encode::{deserialize, serialize};
 
 use crate::chain::{Block, BlockHash, BlockHeader, Network, Transaction, Txid};
 use crate::metrics::{HistogramOpts, HistogramVec, Metrics};
@@ -656,7 +653,7 @@ impl Daemon {
     pub fn get_relayfee(&self) -> Result<f64> {
         let relayfee = self.getnetworkinfo()?.relayfee;
 
-        // from BTC/kB to sat/b
+        // from TDC/kB to tid/b
         Ok(relayfee * 100_000f64)
     }
 }

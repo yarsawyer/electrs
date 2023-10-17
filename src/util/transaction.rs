@@ -4,16 +4,6 @@ use crate::util::BlockId;
 
 use std::collections::HashMap;
 
-#[cfg(feature = "liquid")]
-use bitcoin::hashes::hex::FromHex;
-
-#[cfg(feature = "liquid")]
-lazy_static! {
-    static ref REGTEST_INITIAL_ISSUANCE_PREVOUT: Txid =
-        Txid::from_hex("50cdc410c9d0d61eeacc531f52d2c70af741da33af127c364e52ac1ee7c030a5").unwrap();
-    static ref TESTNET_INITIAL_ISSUANCE_PREVOUT: Txid =
-        Txid::from_hex("0c52d2526a5c9f00e9fb74afd15dd3caaf17c823159a514f929ae25193a43a52").unwrap();
-}
 
 #[derive(Serialize, Deserialize)]
 pub struct TransactionStatus {
@@ -52,27 +42,15 @@ pub struct TxInput {
 }
 
 pub fn is_coinbase(txin: &TxIn) -> bool {
-    #[cfg(not(feature = "liquid"))]
     return txin.previous_output.is_null();
-    #[cfg(feature = "liquid")]
-    return txin.is_coinbase();
 }
 
 pub fn has_prevout(txin: &TxIn) -> bool {
-    #[cfg(not(feature = "liquid"))]
     return !txin.previous_output.is_null();
-    #[cfg(feature = "liquid")]
-    return !txin.is_coinbase()
-        && !txin.is_pegin
-        && txin.previous_output.txid != *REGTEST_INITIAL_ISSUANCE_PREVOUT
-        && txin.previous_output.txid != *TESTNET_INITIAL_ISSUANCE_PREVOUT;
 }
 
 pub fn is_spendable(txout: &TxOut) -> bool {
-    #[cfg(not(feature = "liquid"))]
     return !txout.script_pubkey.is_provably_unspendable();
-    #[cfg(feature = "liquid")]
-    return !txout.is_fee() && !txout.script_pubkey.is_provably_unspendable();
 }
 
 /// Extract the previous TxOuts of a Transaction's TxIns
@@ -135,10 +113,7 @@ pub(super) mod sigops {
         let input_count = tx.input.len();
         let mut prevouts = Vec::with_capacity(input_count);
 
-        #[cfg(not(feature = "liquid"))]
         let is_coinbase = tx.is_coin_base();
-        #[cfg(feature = "liquid")]
-        let is_coinbase = tx.is_coinbase();
 
         if !is_coinbase {
             for idx in 0..input_count {
@@ -215,12 +190,8 @@ pub(super) mod sigops {
     }
 
     fn get_p2sh_sigop_count(tx: &Transaction, previous_outputs: &[&TxOut]) -> usize {
-        #[cfg(not(feature = "liquid"))]
+
         if tx.is_coin_base() {
-            return 0;
-        }
-        #[cfg(feature = "liquid")]
-        if tx.is_coinbase() {
             return 0;
         }
         let mut n = 0;
@@ -306,12 +277,7 @@ pub(super) mod sigops {
         verify_witness: bool,
     ) -> Result<usize, script::Error> {
         let mut n_sigop_cost = get_legacy_sigop_count(tx) * 4;
-        #[cfg(not(feature = "liquid"))]
         if tx.is_coin_base() {
-            return Ok(n_sigop_cost);
-        }
-        #[cfg(feature = "liquid")]
-        if tx.is_coinbase() {
             return Ok(n_sigop_cost);
         }
         if tx.input.len() != previous_outputs.len() {
@@ -334,9 +300,6 @@ pub(super) mod sigops {
     ///
     /// witness_version is the raw opcode. OP_0 is 0, OP_1 is 81, etc.
     fn sig_ops(witness: &Witness, witness_version: u8, witness_program: &[u8]) -> usize {
-        #[cfg(feature = "liquid")]
-        let last_witness = witness.script_witness.last();
-        #[cfg(not(feature = "liquid"))]
         let last_witness = witness.last();
         match (witness_version, witness_program.len()) {
             (0, 20) => 1,

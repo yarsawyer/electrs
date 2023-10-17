@@ -9,8 +9,8 @@ fn main() {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use bitcoin::blockdata::script::Script;
-    use bitcoin::consensus::encode::deserialize;
+    use tidecoin::blockdata::script::Script;
+    use tidecoin::consensus::encode::deserialize;
     use electrs::{
         chain::Transaction,
         config::Config,

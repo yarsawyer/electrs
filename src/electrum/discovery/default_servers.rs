@@ -6,7 +6,7 @@ use crate::electrum::discovery::{DiscoveryManager, Service};
 pub fn add_default_servers(discovery: &DiscoveryManager, network: Network) {
     match network {
         #[cfg(not(feature = "liquid"))]
-        Network::Bitcoin => {
+        Network::Tidecoin => {
             discovery
                 .add_default_server(
                     "3smoooajg7qqac2y.onion".into(),

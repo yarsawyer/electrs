@@ -1,18 +1,12 @@
 use tidecoin::hashes::sha256d::Hash as Sha256dHash;
-#[cfg(not(feature = "liquid"))]
 use tidecoin::util::merkleblock::MerkleBlock;
 use tidecoin::VarInt;
 use itertools::Itertools;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-#[cfg(not(feature = "liquid"))]
 use tidecoin::consensus::encode::{deserialize, serialize};
-#[cfg(feature = "liquid")]
-use elements::{
-    encode::{deserialize, serialize},
-    AssetId,
-};
+
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
@@ -34,8 +28,6 @@ use crate::util::{
 use crate::new_index::db::{DBFlush, DBRow, ReverseScanIterator, ScanIterator, DB};
 use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
 
-#[cfg(feature = "liquid")]
-use crate::elements::{asset, peg};
 
 const MIN_HISTORY_ITEMS_TO_CACHE: usize = 100;
 
@@ -109,13 +101,6 @@ pub struct Utxo {
     pub vout: u32,
     pub confirmed: Option<BlockId>,
     pub value: Value,
-
-    #[cfg(feature = "liquid")]
-    pub asset: elements::confidential::Asset,
-    #[cfg(feature = "liquid")]
-    pub nonce: elements::confidential::Nonce,
-    #[cfg(feature = "liquid")]
-    pub witness: elements::TxOutWitness,
 }
 
 impl From<&Utxo> for OutPoint {
@@ -139,20 +124,11 @@ pub struct ScriptStats {
     pub tx_count: usize,
     pub funded_txo_count: usize,
     pub spent_txo_count: usize,
-    #[cfg(not(feature = "liquid"))]
     pub funded_txo_sum: u64,
-    #[cfg(not(feature = "liquid"))]
     pub spent_txo_sum: u64,
 }
 
 impl ScriptStats {
-    #[cfg(feature = "liquid")]
-    fn is_sane(&self) -> bool {
-        // See below for comments.
-        self.spent_txo_count <= self.funded_txo_count
-            && self.tx_count <= self.spent_txo_count + self.funded_txo_count
-    }
-    #[cfg(not(feature = "liquid"))]
     fn is_sane(&self) -> bool {
         // There are less or equal spends to funds
         self.spent_txo_count <= self.funded_txo_count
@@ -182,8 +158,6 @@ struct IndexerConfig {
     address_search: bool,
     index_unspendables: bool,
     network: Network,
-    #[cfg(feature = "liquid")]
-    parent_network: crate::chain::BNetwork,
 }
 
 impl From<&Config> for IndexerConfig {
@@ -193,8 +167,6 @@ impl From<&Config> for IndexerConfig {
             address_search: config.address_search,
             index_unspendables: config.index_unspendables,
             network: config.network_type,
-            #[cfg(feature = "liquid")]
-            parent_network: config.parent_network,
         }
     }
 }
@@ -1695,163 +1667,4 @@ fn from_utxo_cache(utxos_cache: CachedUtxoMap, chain: &ChainQuery) -> UtxoMap {
             (outpoint, (blockid, value))
         })
         .collect()
-}
-
-#[cfg(all(test, feature = "liquid"))]
-mod tests {
-    use super::{DBRow, TxHistoryRow};
-    use crate::chain::Value;
-    use std::convert::TryInto;
-
-    #[test]
-    fn tx_history_row_ser_deser_tests() {
-        #[rustfmt::skip]
-        let inputs = [
-            vec![
-                // code
-                72,
-                // hash
-                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                   1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                // confirmed_height
-                0, 0, 0, 2,
-                // TxHistoryInfo variant (Funding)
-                0, 0, 0, 0,
-                // FundingInfo
-                // txid
-                2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-                   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-                // vout
-                0, 3,
-                // Value variant (Explicit)
-                0, 0, 0, 0, 0, 0, 0, 2,
-                // number of tuple elements
-                1,
-                // Inner value (u64)
-                7, 0, 0, 0, 0, 0, 0, 0,
-            ],
-            vec![
-                72,
-                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                   1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                0, 0, 0, 2,
-                0, 0, 0, 0,
-                2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-                   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-                0, 3,
-                // Value variant (Null)
-                0, 0, 0, 0, 0, 0, 0, 1,
-                // number of tuple elements
-                0,
-            ],
-            vec![
-                72,
-                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                   1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                0, 0, 0, 2,
-                0, 0, 0, 1,
-                18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18,
-                    18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18,
-                0, 12,
-                98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102,
-                    98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102,
-                0, 9,
-                0, 0, 0, 0, 0, 0, 0, 2,
-                1,
-                14, 0, 0, 0, 0, 0, 0, 0,
-            ],
-            vec![
-                72,
-                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                   1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                0, 0, 0, 2,
-                0, 0, 0, 1,
-                18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18,
-                    18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18,
-                0, 12,
-                98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102,
-                    98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102,
-                0, 9,
-                0, 0, 0, 0, 0, 0, 0, 1,
-                0,
-            ],
-        ];
-        let expected = [
-            super::TxHistoryRow {
-                key: super::TxHistoryKey {
-                    code: b'H',
-                    hash: [1; 32],
-                    confirmed_height: 2,
-                    txinfo: super::TxHistoryInfo::Funding(super::FundingInfo {
-                        txid: [2; 32],
-                        vout: 3,
-                        value: Value::Explicit(7),
-                    }),
-                },
-            },
-            super::TxHistoryRow {
-                key: super::TxHistoryKey {
-                    code: b'H',
-                    hash: [1; 32],
-                    confirmed_height: 2,
-                    txinfo: super::TxHistoryInfo::Funding(super::FundingInfo {
-                        txid: [2; 32],
-                        vout: 3,
-                        value: Value::Null,
-                    }),
-                },
-            },
-            super::TxHistoryRow {
-                key: super::TxHistoryKey {
-                    code: b'H',
-                    hash: [1; 32],
-                    confirmed_height: 2,
-                    txinfo: super::TxHistoryInfo::Spending(super::SpendingInfo {
-                        txid: [18; 32],
-                        vin: 12,
-                        prev_txid: "beef".repeat(8).as_bytes().try_into().unwrap(),
-                        prev_vout: 9,
-                        value: Value::Explicit(14),
-                    }),
-                },
-            },
-            super::TxHistoryRow {
-                key: super::TxHistoryKey {
-                    code: b'H',
-                    hash: [1; 32],
-                    confirmed_height: 2,
-                    txinfo: super::TxHistoryInfo::Spending(super::SpendingInfo {
-                        txid: [18; 32],
-                        vin: 12,
-                        prev_txid: "beef".repeat(8).as_bytes().try_into().unwrap(),
-                        prev_vout: 9,
-                        value: Value::Null,
-                    }),
-                },
-            },
-        ];
-        for (expected_row, input) in
-            IntoIterator::into_iter(expected).zip(IntoIterator::into_iter(inputs))
-        {
-            let input_row = DBRow {
-                key: input,
-                value: vec![],
-            };
-            assert_eq!(TxHistoryRow::from_row(input_row).key, expected_row.key);
-        }
-
-        #[rustfmt::skip]
-        assert_eq!(
-            TxHistoryRow::prefix_height(b'H', "beef".repeat(8).as_bytes(), 1337),
-            vec![
-                // code
-                72,
-                // hash
-                98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102,
-                98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102, 98, 101, 101, 102,
-                // height
-                0, 0, 5, 57
-            ]
-        );
-    }
 }

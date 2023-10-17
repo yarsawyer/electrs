@@ -8,7 +8,6 @@ use crate::util::{
     ScriptToAddr, ScriptToAsm, TransactionStatus,
 };
 
-#[cfg(not(feature = "liquid"))]
 use {tidecoin::consensus::encode, std::str::FromStr};
 
 use tidecoin::blockdata::opcodes;
@@ -21,14 +20,6 @@ use tokio::sync::oneshot;
 
 use hyperlocal::UnixServerExt;
 use std::fs;
-#[cfg(feature = "liquid")]
-use {
-    crate::elements::{peg::PegoutValue, AssetSorting, IssuanceValue},
-    elements::{
-        confidential::{Asset, Nonce, Value},
-        encode, AssetId,
-    },
-};
 
 use serde::Serialize;
 use serde_json;
@@ -41,10 +32,6 @@ use url::form_urlencoded;
 
 const ADDRESS_SEARCH_LIMIT: usize = 10;
 
-#[cfg(feature = "liquid")]
-const ASSETS_PER_PAGE: usize = 25;
-#[cfg(feature = "liquid")]
-const ASSETS_MAX_PER_PAGE: usize = 100;
 
 const TTL_LONG: u32 = 157_784_630; // ttl for static resources (5 years)
 const TTL_SHORT: u32 = 10; // ttl for volatie resources
@@ -64,20 +51,12 @@ struct BlockValue {
     previousblockhash: Option<String>,
     mediantime: u32,
 
-    #[cfg(not(feature = "liquid"))]
     nonce: u32,
-    #[cfg(not(feature = "liquid"))]
     bits: u32,
-    #[cfg(not(feature = "liquid"))]
     difficulty: f64,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ext: Option<serde_json::Value>,
 }
 
 impl BlockValue {
-    #[cfg_attr(feature = "liquid", allow(unused_variables))]
     fn new(blockhm: BlockHeaderMeta) -> Self {
         let header = blockhm.header_entry.header();
         BlockValue {
@@ -101,15 +80,9 @@ impl BlockValue {
             },
             mediantime: blockhm.mtp,
 
-            #[cfg(not(feature = "liquid"))]
             bits: header.bits,
-            #[cfg(not(feature = "liquid"))]
             nonce: header.nonce,
-            #[cfg(not(feature = "liquid"))]
             difficulty: difficulty_new(header),
-
-            #[cfg(feature = "liquid")]
-            ext: Some(json!(header.ext)),
         }
     }
 }
@@ -118,7 +91,6 @@ impl BlockValue {
 /// using Bitcoin Core code ported to Rust.
 ///
 /// https://github.com/bitcoin/bitcoin/blob/v25.0/src/rpc/blockchain.cpp#L75-L97
-#[cfg_attr(feature = "liquid", allow(dead_code))]
 fn difficulty_new(bh: &tidecoin::BlockHeader) -> f64 {
     let mut n_shift = bh.bits >> 24 & 0xff;
     let mut d_diff = (0x0000ffff as f64) / ((bh.bits & 0x00ffffff) as f64);
@@ -210,18 +182,11 @@ struct TxInValue {
     #[serde(skip_serializing_if = "Option::is_none")]
     inner_witnessscript_asm: Option<String>,
 
-    #[cfg(feature = "liquid")]
-    is_pegin: bool,
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    issuance: Option<IssuanceValue>,
 }
 
 impl TxInValue {
     fn new(txin: &TxIn, prevout: Option<&TxOut>, config: &Config) -> Self {
         let witness = &txin.witness;
-        #[cfg(feature = "liquid")]
-        let witness = &witness.script_witness;
 
         let witness = if !witness.is_empty() {
             Some(witness.iter().map(hex::encode).collect())
@@ -251,14 +216,6 @@ impl TxInValue {
 
             is_coinbase,
             sequence: txin.sequence,
-            #[cfg(feature = "liquid")]
-            is_pegin: txin.is_pegin,
-            #[cfg(feature = "liquid")]
-            issuance: if txin.has_issuance() {
-                Some(IssuanceValue::from(txin))
-            } else {
-                None
-            },
 
             scriptsig: txin.script_sig.clone(),
         }
@@ -274,59 +231,14 @@ struct TxOutValue {
     #[serde(skip_serializing_if = "Option::is_none")]
     scriptpubkey_address: Option<String>,
 
-    #[cfg(not(feature = "liquid"))]
     value: u64,
 
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    value: Option<u64>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    valuecommitment: Option<String>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    asset: Option<String>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    assetcommitment: Option<String>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pegout: Option<PegoutValue>,
 }
 
 impl TxOutValue {
     fn new(txout: &TxOut, config: &Config) -> Self {
-        #[cfg(not(feature = "liquid"))]
         let value = txout.value;
-
-        #[cfg(feature = "liquid")]
-        let value = txout.value.explicit();
-        #[cfg(feature = "liquid")]
-        let valuecommitment = match txout.value {
-            Value::Confidential(..) => Some(hex::encode(encode::serialize(&txout.value))),
-            _ => None,
-        };
-
-        #[cfg(feature = "liquid")]
-        let asset = match txout.asset {
-            Asset::Explicit(value) => Some(value.to_hex()),
-            _ => None,
-        };
-        #[cfg(feature = "liquid")]
-        let assetcommitment = match txout.asset {
-            Asset::Confidential(..) => Some(hex::encode(encode::serialize(&txout.asset))),
-            _ => None,
-        };
-
-        #[cfg(not(feature = "liquid"))]
         let is_fee = false;
-        #[cfg(feature = "liquid")]
-        let is_fee = txout.is_fee();
-
         let script = &txout.script_pubkey;
         let script_asm = script.to_asm();
         let script_addr = script.to_address_str(config.network_type);
@@ -348,8 +260,6 @@ impl TxOutValue {
             "v0_p2wpkh"
         } else if script.is_v0_p2wsh() {
             "v0_p2wsh"
-        } else if is_v1_p2tr(script) {
-            "v1_p2tr"
         } else if script.is_provably_unspendable() {
             "provably_unspendable"
         } else if is_bare_multisig(script) {
@@ -358,31 +268,16 @@ impl TxOutValue {
             "unknown"
         };
 
-        #[cfg(feature = "liquid")]
-        let pegout = PegoutValue::from_txout(txout, config.network_type, config.parent_network);
-
         TxOutValue {
             scriptpubkey: script.clone(),
             scriptpubkey_asm: script_asm,
             scriptpubkey_address: script_addr,
             scriptpubkey_type: script_type.to_string(),
             value,
-            #[cfg(feature = "liquid")]
-            valuecommitment,
-            #[cfg(feature = "liquid")]
-            asset,
-            #[cfg(feature = "liquid")]
-            assetcommitment,
-            #[cfg(feature = "liquid")]
-            pegout,
         }
     }
 }
-fn is_v1_p2tr(script: &Script) -> bool {
-    script.len() == 34
-        && script[0] == opcodes::all::OP_PUSHNUM_1.into_u8()
-        && script[1] == opcodes::all::OP_PUSHBYTES_32.into_u8()
-}
+
 fn is_bare_multisig(script: &Script) -> bool {
     let len = script.len();
     // 1-of-1 multisig is 37 bytes
@@ -405,41 +300,7 @@ struct UtxoValue {
     txid: Txid,
     vout: u32,
     status: TransactionStatus,
-
-    #[cfg(not(feature = "liquid"))]
     value: u64,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    value: Option<u64>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    valuecommitment: Option<String>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    asset: Option<String>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    assetcommitment: Option<String>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    nonce: Option<String>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    noncecommitment: Option<String>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Vec::is_empty", with = "crate::util::serde_hex")]
-    surjection_proof: Vec<u8>,
-
-    #[cfg(feature = "liquid")]
-    #[serde(skip_serializing_if = "Vec::is_empty", with = "crate::util::serde_hex")]
-    range_proof: Vec<u8>,
 }
 impl From<Utxo> for UtxoValue {
     fn from(utxo: Utxo) -> Self {
@@ -447,47 +308,8 @@ impl From<Utxo> for UtxoValue {
             txid: utxo.txid,
             vout: utxo.vout,
             status: TransactionStatus::from(utxo.confirmed),
-
-            #[cfg(not(feature = "liquid"))]
             value: utxo.value,
 
-            #[cfg(feature = "liquid")]
-            value: match utxo.value {
-                Value::Explicit(value) => Some(value),
-                _ => None,
-            },
-            #[cfg(feature = "liquid")]
-            valuecommitment: match utxo.value {
-                Value::Confidential(..) => Some(hex::encode(encode::serialize(&utxo.value))),
-                _ => None,
-            },
-            #[cfg(feature = "liquid")]
-            asset: match utxo.asset {
-                Asset::Explicit(asset) => Some(asset.to_hex()),
-                _ => None,
-            },
-            #[cfg(feature = "liquid")]
-            assetcommitment: match utxo.asset {
-                Asset::Confidential(..) => Some(hex::encode(encode::serialize(&utxo.asset))),
-                _ => None,
-            },
-            #[cfg(feature = "liquid")]
-            nonce: match utxo.nonce {
-                Nonce::Explicit(nonce) => Some(nonce.to_hex()),
-                _ => None,
-            },
-            #[cfg(feature = "liquid")]
-            noncecommitment: match utxo.nonce {
-                Nonce::Confidential(..) => Some(hex::encode(encode::serialize(&utxo.nonce))),
-                _ => None,
-            },
-            #[cfg(feature = "liquid")]
-            surjection_proof: utxo
-                .witness
-                .surjection_proof
-                .map_or(vec![], |p| (*p).serialize()),
-            #[cfg(feature = "liquid")]
-            range_proof: utxo.witness.rangeproof.map_or(vec![], |p| (*p).serialize()),
         }
     }
 }
@@ -1063,7 +885,6 @@ fn handle_request(
                 ttl,
             )
         }
-        #[cfg(not(feature = "liquid"))]
         (&Method::GET, Some(&"tx"), Some(hash), Some(&"merkleblock-proof"), None, None) => {
             let hash = Txid::from_hex(hash)?;
 
@@ -1219,128 +1040,6 @@ fn handle_request(
             json_response(query.estimate_fee_map(), TTL_SHORT)
         }
 
-        #[cfg(feature = "liquid")]
-        (&Method::GET, Some(&"assets"), Some(&"registry"), None, None, None) => {
-            let start_index: usize = query_params
-                .get("start_index")
-                .and_then(|n| n.parse().ok())
-                .unwrap_or(0);
-
-            let limit: usize = query_params
-                .get("limit")
-                .and_then(|n| n.parse().ok())
-                .map(|n: usize| n.min(ASSETS_MAX_PER_PAGE))
-                .unwrap_or(ASSETS_PER_PAGE);
-
-            let sorting = AssetSorting::from_query_params(&query_params)?;
-
-            let (total_num, assets) = query.list_registry_assets(start_index, limit, sorting)?;
-
-            Ok(Response::builder()
-                // Disable caching because we don't currently support caching with query string params
-                .header("Cache-Control", "no-store")
-                .header("Content-Type", "application/json")
-                .header("X-Powered-By", &**VERSION_STRING)
-                .header("X-Total-Results", total_num.to_string())
-                .body(Body::from(serde_json::to_string(&assets)?))
-                .unwrap())
-        }
-
-        #[cfg(feature = "liquid")]
-        (&Method::GET, Some(&"asset"), Some(asset_str), None, None, None) => {
-            let asset_id = AssetId::from_hex(asset_str)?;
-            let asset_entry = query
-                .lookup_asset(&asset_id)?
-                .ok_or_else(|| HttpError::not_found("Asset id not found".to_string()))?;
-
-            json_response(asset_entry, TTL_SHORT)
-        }
-
-        #[cfg(feature = "liquid")]
-        (&Method::GET, Some(&"asset"), Some(asset_str), Some(&"txs"), None, None) => {
-            let asset_id = AssetId::from_hex(asset_str)?;
-
-            let mut txs = vec![];
-
-            txs.extend(
-                query
-                    .mempool()
-                    .asset_history(&asset_id, config.rest_default_max_mempool_txs)
-                    .into_iter()
-                    .map(|tx| (tx, None)),
-            );
-
-            txs.extend(
-                query
-                    .chain()
-                    .asset_history(&asset_id, None, config.rest_default_chain_txs_per_page)
-                    .into_iter()
-                    .map(|(tx, blockid)| (tx, Some(blockid))),
-            );
-
-            json_response(prepare_txs(txs, query, config), TTL_SHORT)
-        }
-
-        #[cfg(feature = "liquid")]
-        (
-            &Method::GET,
-            Some(&"asset"),
-            Some(asset_str),
-            Some(&"txs"),
-            Some(&"chain"),
-            last_seen_txid,
-        ) => {
-            let asset_id = AssetId::from_hex(asset_str)?;
-            let last_seen_txid = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok());
-
-            let txs = query
-                .chain()
-                .asset_history(
-                    &asset_id,
-                    last_seen_txid.as_ref(),
-                    config.rest_default_chain_txs_per_page,
-                )
-                .into_iter()
-                .map(|(tx, blockid)| (tx, Some(blockid)))
-                .collect();
-
-            json_response(prepare_txs(txs, query, config), TTL_SHORT)
-        }
-
-        #[cfg(feature = "liquid")]
-        (&Method::GET, Some(&"asset"), Some(asset_str), Some(&"txs"), Some(&"mempool"), None) => {
-            let asset_id = AssetId::from_hex(asset_str)?;
-
-            let txs = query
-                .mempool()
-                .asset_history(&asset_id, config.rest_default_max_mempool_txs)
-                .into_iter()
-                .map(|tx| (tx, None))
-                .collect();
-
-            json_response(prepare_txs(txs, query, config), TTL_SHORT)
-        }
-
-        #[cfg(feature = "liquid")]
-        (&Method::GET, Some(&"asset"), Some(asset_str), Some(&"supply"), param, None) => {
-            let asset_id = AssetId::from_hex(asset_str)?;
-            let asset_entry = query
-                .lookup_asset(&asset_id)?
-                .ok_or_else(|| HttpError::not_found("Asset id not found".to_string()))?;
-
-            let supply = asset_entry
-                .supply()
-                .ok_or_else(|| HttpError::from("Asset supply is blinded".to_string()))?;
-            let precision = asset_entry.precision();
-
-            if param == Some(&"decimal") && precision > 0 {
-                let supply_dec = supply as f64 / 10u32.pow(precision.into()) as f64;
-                http_message(StatusCode::OK, supply_dec.to_string(), TTL_SHORT)
-            } else {
-                http_message(StatusCode::OK, supply.to_string(), TTL_SHORT)
-            }
-        }
-
         _ => Err(HttpError::not_found(format!(
             "endpoint does not exist {:?}",
             uri.path()
@@ -1418,11 +1117,6 @@ fn blocks(
         #[allow(unused_mut)]
         let mut value = BlockValue::new(blockhm);
 
-        #[cfg(feature = "liquid")]
-        {
-            // exclude ExtData in block list view
-            value.ext = None;
-        }
         values.push(value);
 
         if current_hash[..] == zero[..] {
@@ -1445,12 +1139,9 @@ fn to_scripthash(
 }
 
 fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpError> {
-    #[cfg(not(feature = "liquid"))]
     let addr = address::Address::from_str(addr)?;
-    #[cfg(feature = "liquid")]
-    let addr = address::Address::parse_with_params(addr, network.address_params())?;
 
-    #[cfg(not(feature = "liquid"))]
+
     let is_expected_net = {
         let addr_network = Network::from(addr.network);
 
@@ -1459,9 +1150,6 @@ fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpE
         addr_network == network
             || (addr_network == Network::Testnet)
     };
-
-    #[cfg(feature = "liquid")]
-    let is_expected_net = addr.params == network.address_params();
 
     if !is_expected_net {
         bail!(HttpError::from("Address on invalid network".to_string()))
@@ -1546,12 +1234,6 @@ impl From<encode::Error> for HttpError {
 }
 impl From<std::string::FromUtf8Error> for HttpError {
     fn from(e: std::string::FromUtf8Error) -> Self {
-        HttpError::from(e.to_string())
-    }
-}
-#[cfg(feature = "liquid")]
-impl From<address::AddressError> for HttpError {
-    fn from(e: address::AddressError) -> Self {
         HttpError::from(e.to_string())
     }
 }

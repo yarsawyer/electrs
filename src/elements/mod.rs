@@ -1,4 +1,4 @@
-use bitcoin::hashes::{hex::ToHex, Hash};
+use tidecoin::hashes::{hex::ToHex, Hash};
 use elements::secp256k1_zkp::ZERO_TWEAK;
 use elements::{confidential::Value, encode::serialize, issuance::ContractHash, AssetId, TxIn};
 
