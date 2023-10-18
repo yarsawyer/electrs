@@ -77,7 +77,7 @@ fn bitcoind_fetcher(
                 let blockhashes: Vec<BlockHash> = entries.iter().map(|e| *e.hash()).collect();
                 let blocks = daemon
                     .getblocks(&blockhashes)
-                    .expect("failed to get blocks from bitcoind");
+                    .expect("failed to get blocks from tidecoind");
                 assert_eq!(blocks.len(), entries.len());
                 let block_entries: Vec<BlockEntry> = blocks
                     .into_iter()

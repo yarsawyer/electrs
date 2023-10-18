@@ -1,3 +1,5 @@
+# Check blocknotify=pkill -USR1 electrs
+
 # Electrum
 
 * Snapshot DB after successful indexing - and run queries on the latest snapshot

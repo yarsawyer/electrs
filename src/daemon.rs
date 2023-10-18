@@ -111,7 +111,7 @@ pub struct MempoolInfo {
 struct NetworkInfo {
     version: u64,
     subversion: String,
-    relayfee: f64, // in BTC/kB
+    relayfee: f64, // in TDC/kB
 }
 
 pub trait CookieGetter: Send + Sync {
@@ -418,7 +418,7 @@ impl Daemon {
         loop {
             match self.handle_request_batch(method, params_list) {
                 Err(Error(ErrorKind::Connection(msg), _)) => {
-                    warn!("reconnecting to bitcoind: {}", msg);
+                    warn!("reconnecting to tidecoind: {}", msg);
                     self.signal.wait(Duration::from_secs(3), false)?;
                     let mut conn = self.conn.lock().unwrap();
                     *conn = conn.reconnect()?;
