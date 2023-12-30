@@ -159,6 +159,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin"
+version = "0.28.2"
+dependencies = [
+ "bech32",
+ "bitcoin_hashes 0.10.0",
+ "secp256k1 0.22.1",
+ "serde",
+]
+
+[[package]]
 name = "bitcoin_hashes"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -354,7 +364,7 @@ dependencies = [
  "arrayref",
  "base64 0.13.0",
  "bincode",
- "bitcoin 0.28.0",
+ "bitcoin 0.28.2",
  "clap",
  "crossbeam-channel",
  "dirs",

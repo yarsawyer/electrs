@@ -6,6 +6,7 @@ use bitcoin::consensus::encode::{deserialize, Decodable};
 use elements::encode::{deserialize, Decodable};
 
 use std::collections::HashMap;
+use std::f32::consts::E;
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -185,6 +186,8 @@ fn blkfiles_parser(blobs: Fetcher<Vec<u8>>, magic: u32) -> Fetcher<Vec<SizedBloc
 }
 
 fn parse_blocks(blob: Vec<u8>, magic: u32) -> Result<Vec<SizedBlock>> {
+
+
     let mut cursor = Cursor::new(&blob);
     let mut slices = vec![];
     let max_pos = blob.len() as u64;
@@ -198,12 +201,15 @@ fn parse_blocks(blob: Vec<u8>, magic: u32) -> Result<Vec<SizedBlock>> {
                     continue;
                 }
             }
-            Err(_) => break, // EOF
+            Err(e) => {
+                trace!("Consensus Error: {}", e);
+                break // EOF
+            }
         };
         let block_size = u32::consensus_decode(&mut cursor).chain_err(|| "no block size")?;
         let start = cursor.position();
         let end = start + block_size as u64;
-
+        
         // If Core's WriteBlockToDisk ftell fails, only the magic bytes and size will be written
         // and the block body won't be written to the blk*.dat file.
         // Since the first 4 bytes should contain the block's version, we can skip such blocks

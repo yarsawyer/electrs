@@ -245,7 +245,7 @@ impl Config {
 
         let default_daemon_port = match network_type {
             #[cfg(not(feature = "liquid"))]
-            Network::Bitcoin => 8332,
+            Network::Bitcoin => 19918,
             #[cfg(not(feature = "liquid"))]
             Network::Testnet => 18332,
             #[cfg(not(feature = "liquid"))]

@@ -111,7 +111,7 @@ pub struct BlockchainInfo {
 #[derive(Serialize, Deserialize, Debug)]
 struct NetworkInfo {
     version: u64,
-    subversion: String,
+    //subversion: String,
     relayfee: f64, // in BTC/kB
 }
 
@@ -303,12 +303,12 @@ impl Daemon {
         };
         let network_info = daemon.getnetworkinfo()?;
         info!("{:?}", network_info);
-        if network_info.version < 16_00_00 {
-            bail!(
-                "{} is not supported - please use bitcoind 0.16+",
-                network_info.subversion,
-            )
-        }
+        //if network_info.version < 16_00_00 {
+        //    bail!(
+        //        "{} is not supported - please use bitcoind 0.16+",
+        //        network_info.subversion,
+        //    )
+        //}
         let blockchain_info = daemon.getblockchaininfo()?;
         info!("{:?}", blockchain_info);
         if blockchain_info.pruned {
@@ -432,7 +432,7 @@ impl Daemon {
     }
 
     fn getnetworkinfo(&self) -> Result<NetworkInfo> {
-        let info: Value = self.request("getnetworkinfo", json!([]))?;
+        let info: Value = self.request("getinfo", json!([]))?;
         Ok(from_value(info).chain_err(|| "invalid network info")?)
     }
 
@@ -633,9 +633,10 @@ impl Daemon {
     }
 
     pub fn get_relayfee(&self) -> Result<f64> {
-        let relayfee = self.getnetworkinfo()?.relayfee;
-
+        //let relayfee = self.getnetworkinfo()?.relayfee;
+        
         // from BTC/kB to sat/b
-        Ok(relayfee * 100_000f64)
+        //Ok(relayfee * 100_000f64)
+        Ok(0.0001 * 100_000f64)
     }
 }
