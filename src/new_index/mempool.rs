@@ -1,7 +1,7 @@
 use bounded_vec_deque::BoundedVecDeque;
 use itertools::Itertools;
 
-use tidecoin::consensus::encode::serialize;
+use bitcoin::consensus::encode::serialize;
 
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

@@ -284,21 +284,21 @@ impl Config {
 
 
         let default_daemon_port = match network_type {
-            Network::Tidecoin => 9982,
+            Network::Bellscoin => 9982,
             Network::Testnet => 19982,
         };
         let default_electrum_port = match network_type {
-            Network::Tidecoin => 50001,
+            Network::Bellscoin => 50001,
             Network::Testnet => 60001,
 
         };
 
         let default_http_port = match network_type {
-            Network::Tidecoin => 3000,
+            Network::Bellscoin => 3000,
             Network::Testnet => 3001,
         };
         let default_monitoring_port = match network_type {
-            Network::Tidecoin => 4224,
+            Network::Bellscoin => 4224,
             Network::Testnet => 14224,
         };
 
@@ -335,7 +335,7 @@ impl Config {
                 default_dir
             });
         match network_type {
-            Network::Tidecoin => (),
+            Network::Bellscoin => (),
             Network::Testnet => daemon_dir.push("testnet3"),
         }
         let blocks_dir = m

@@ -1,11 +1,11 @@
-use tidecoin::hashes::sha256d::Hash as Sha256dHash;
-use tidecoin::util::merkleblock::MerkleBlock;
-use tidecoin::VarInt;
+use bitcoin::hashes::sha256d::Hash as Sha256dHash;
+use bitcoin::util::merkleblock::MerkleBlock;
+use bitcoin::VarInt;
 use itertools::Itertools;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-use tidecoin::consensus::encode::{deserialize, serialize};
+use bitcoin::consensus::encode::{deserialize, serialize};
 
 
 use std::collections::{BTreeSet, HashMap, HashSet};

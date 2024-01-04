@@ -1,4 +1,4 @@
-pub use tidecoin::{
+pub use bitcoin::{
     blockdata::{opcodes, script, witness::Witness},
     consensus::deserialize,
     hashes,
@@ -7,14 +7,15 @@ pub use tidecoin::{
 };
 
 
-use tidecoin::blockdata::constants::genesis_block;
-pub use tidecoin::network::constants::Network as BNetwork;
+use bitcoin::blockdata::constants::genesis_block;
+pub use bitcoin::network::constants::Network as BNetwork;
+
 
 pub type Value = u64;
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash, Serialize, Ord, PartialOrd, Eq)]
 pub enum Network {
-    Tidecoin,
+    Bellscoin,
     Testnet,
 }
 
@@ -37,24 +38,24 @@ pub fn genesis_hash(network: Network) -> BlockHash {
 
 }
 
-pub fn tidecoin_genesis_hash(network: BNetwork) -> tidecoin::BlockHash {
+pub fn tidecoin_genesis_hash(network: BNetwork) -> bitcoin::BlockHash {
     lazy_static! {
-        static ref TIDECOIN_GENESIS: tidecoin::BlockHash =
-            genesis_block(BNetwork::Tidecoin).block_hash();
-        static ref TESTNET_GENESIS: tidecoin::BlockHash =
+        static ref TIDECOIN_GENESIS: bitcoin::BlockHash =
+            genesis_block(BNetwork::Bitcoin).block_hash();
+        static ref TESTNET_GENESIS: bitcoin::BlockHash =
             genesis_block(BNetwork::Testnet).block_hash();
     }
     match network {
-        BNetwork::Tidecoin => *TIDECOIN_GENESIS,
+        BNetwork::Bitcoin => *TIDECOIN_GENESIS,
         BNetwork::Testnet => *TESTNET_GENESIS,
-
+        _ => panic!("unsupported Bells network: {:?}", network),
     }
 }
 
 impl From<&str> for Network {
     fn from(network_name: &str) -> Self {
         match network_name {
-            "mainnet" => Network::Tidecoin,
+            "mainnet" => Network::Bellscoin,
             "testnet" => Network::Testnet,
             _ => panic!("unsupported Tidecoin network: {:?}", network_name),
         }
@@ -64,7 +65,7 @@ impl From<&str> for Network {
 impl From<Network> for BNetwork {
     fn from(network: Network) -> Self {
         match network {
-            Network::Tidecoin => BNetwork::Tidecoin,
+            Network::Bellscoin => BNetwork::Bitcoin,
             Network::Testnet => BNetwork::Testnet,
         }
     }
@@ -73,8 +74,9 @@ impl From<Network> for BNetwork {
 impl From<BNetwork> for Network {
     fn from(network: BNetwork) -> Self {
         match network {
-            BNetwork::Tidecoin => Network::Tidecoin,
+            BNetwork::Bitcoin => Network::Bellscoin,
             BNetwork::Testnet => Network::Testnet,
+            _ => panic!("unsupported Bells network: {:?}", network),
         }
     }
 }

@@ -13,13 +13,13 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use tidecoin::hashes::sha256d::Hash as Sha256dHash;
+use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use error_chain::ChainedError;
 use hex;
 use serde_json::{from_str, Value};
 use sha2::{Digest, Sha256};
 
-use tidecoin::consensus::encode::serialize;
+use bitcoin::consensus::encode::serialize;
 
 use crate::chain::Txid;
 use crate::config::{Config, VERSION_STRING};

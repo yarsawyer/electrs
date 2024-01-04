@@ -6,13 +6,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64;
-use tidecoin::hashes::hex::{FromHex, ToHex};
+use bitcoin::hashes::hex::{FromHex, ToHex};
 use glob;
 use hex;
 use itertools::Itertools;
 use serde_json::{from_str, from_value, Value};
 
-use tidecoin::consensus::encode::{deserialize, serialize};
+use bitcoin::consensus::encode::{deserialize, serialize};
 
 use crate::chain::{Block, BlockHash, BlockHeader, Network, Transaction, Txid};
 use crate::metrics::{HistogramOpts, HistogramVec, Metrics};

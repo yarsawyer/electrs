@@ -21,7 +21,7 @@ use std::sync::Mutex;
 use std::thread::{self, ThreadId};
 
 use crate::chain::BlockHeader;
-use tidecoin::hashes::sha256d::Hash as Sha256dHash;
+use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
 
@@ -194,7 +194,7 @@ pub fn create_socket(addr: &SocketAddr) -> Socket {
 ///
 /// Copied from https://github.com/rust-bitcoin/rust-bitcoincore-rpc/blob/master/json/src/lib.rs
 pub mod serde_hex {
-    use tidecoin::hashes::hex::{FromHex, ToHex};
+    use bitcoin::hashes::hex::{FromHex, ToHex};
     use serde::de::Error;
     use serde::{Deserializer, Serializer};
 
@@ -208,7 +208,7 @@ pub mod serde_hex {
     }
 
     pub mod opt {
-        use tidecoin::hashes::hex::{FromHex, ToHex};
+        use bitcoin::hashes::hex::{FromHex, ToHex};
         use serde::de::Error;
         use serde::{Deserializer, Serializer};
 

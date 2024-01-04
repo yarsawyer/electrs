@@ -8,11 +8,11 @@ use crate::util::{
     ScriptToAddr, ScriptToAsm, TransactionStatus,
 };
 
-use {tidecoin::consensus::encode, std::str::FromStr};
+use {bitcoin::consensus::encode, std::str::FromStr};
 
-use tidecoin::blockdata::opcodes;
-use tidecoin::hashes::hex::{FromHex, ToHex};
-use tidecoin::hashes::Error as HashError;
+use bitcoin::blockdata::opcodes;
+use bitcoin::hashes::hex::{FromHex, ToHex};
+use bitcoin::hashes::Error as HashError;
 use hex::{self, FromHexError};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Response, Server, StatusCode};
@@ -91,7 +91,7 @@ impl BlockValue {
 /// using Bitcoin Core code ported to Rust.
 ///
 /// https://github.com/bitcoin/bitcoin/blob/v25.0/src/rpc/blockchain.cpp#L75-L97
-fn difficulty_new(bh: &tidecoin::BlockHeader) -> f64 {
+fn difficulty_new(bh: &bitcoin::BlockHeader) -> f64 {
     let mut n_shift = bh.bits >> 24 & 0xff;
     let mut d_diff = (0x0000ffff as f64) / ((bh.bits & 0x00ffffff) as f64);
 
@@ -1199,14 +1199,14 @@ impl From<FromHexError> for HttpError {
         HttpError::from("Invalid hex string".to_string())
     }
 }
-impl From<tidecoin::hashes::hex::Error> for HttpError {
-    fn from(_e: tidecoin::hashes::hex::Error) -> Self {
+impl From<bitcoin::hashes::hex::Error> for HttpError {
+    fn from(_e: bitcoin::hashes::hex::Error) -> Self {
         //HttpError::from(e.description().to_string())
         HttpError::from("Invalid hex string".to_string())
     }
 }
-impl From<tidecoin::util::address::Error> for HttpError {
-    fn from(_e: tidecoin::util::address::Error) -> Self {
+impl From<bitcoin::util::address::Error> for HttpError {
+    fn from(_e: bitcoin::util::address::Error) -> Self {
         //HttpError::from(e.description().to_string())
         HttpError::from("Invalid Tidecoin address".to_string())
     }
@@ -1407,7 +1407,7 @@ mod tests {
             ),
         ];
 
-        let to_bh = |b| tidecoin::BlockHeader {
+        let to_bh = |b| bitcoin::BlockHeader {
             version: 1,
             prev_blockhash: "0000000000000000000000000000000000000000000000000000000000000000"
                 .parse()

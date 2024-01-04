@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 
-use tidecoin::consensus::encode::{deserialize, Decodable};
+use bitcoin::consensus::encode::{deserialize, Decodable};
 
 use std::collections::HashMap;
 use std::fs;
