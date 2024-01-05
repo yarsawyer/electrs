@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 
 use bitcoin::consensus::encode::{deserialize, serialize};
 
-
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 use std::path::Path;
@@ -27,7 +26,6 @@ use crate::util::{
 
 use crate::new_index::db::{DBFlush, DBRow, ReverseScanIterator, ScanIterator, DB};
 use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
-
 
 const MIN_HISTORY_ITEMS_TO_CACHE: usize = 100;
 

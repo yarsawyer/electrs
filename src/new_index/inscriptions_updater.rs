@@ -4,17 +4,21 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use bitcoin::{OutPoint, Transaction, Txid};
-use crossbeam_channel::Receiver;
+use bitcoin::consensus::Decodable;
+use bitcoin::{hashes::Hash, OutPoint, Transaction, Txid};
+use tokio::sync::mpsc::Receiver;
 
-use crate::inscription_entries::{
-    entry::{Entry, InscriptionEntry},
-    height::Height,
-    index::Index,
-    inscription::Inscription,
-    inscription::ParsedInscription,
-    inscription_id::InscriptionId,
-    Sat, SatPoint,
+use crate::{
+    db_key,
+    inscription_entries::{
+        entry::{Entry, InscriptionEntry},
+        height::Height,
+        index::Index,
+        inscription::Inscription,
+        inscription::ParsedInscription,
+        inscription_id::InscriptionId,
+        Sat, SatPoint,
+    },
 };
 
 use super::DB;
@@ -33,41 +37,43 @@ enum Origin {
 pub(crate) struct InscriptionUpdater<'a> {
     flotsam: Vec<Flotsam>,
     height: u64,
-    id_to_satpoint: DB,
-    id_to_txids: DB,
-    txid_to_tx: DB,
-    partial_txid_to_txids: DB,
+    id_to_satpoint: &'a str,
+    id_to_txids: &'a str,
+    txid_to_tx: &'a str,
+    partial_txid_to_txids: &'a str,
     value_receiver: &'a mut Receiver<u64>,
-    id_to_entry: DB,
+    id_to_entry: &'a str,
     lost_sats: u64,
     next_number: u64,
-    number_to_id: DB,
-    outpoint_to_value: DB,
+    number_to_id: &'a str,
+    outpoint_to_value: &'a str,
     reward: u64,
-    sat_to_inscription_id: DB,
-    satpoint_to_id: DB,
+    sat_to_inscription_id: &'a str,
+    satpoint_to_id: &'a str,
     timestamp: u32,
     value_cache: &'a mut HashMap<OutPoint, u64>,
+    database: &'a DB,
 }
 
 impl<'a> InscriptionUpdater<'a> {
     pub(crate) fn new(
         height: u64,
-        id_to_satpoint: DB,
-        id_to_txids: DB,
-        txid_to_tx: DB,
-        partial_txid_to_txids: DB,
+        id_to_satpoint: &'a str,
+        id_to_txids: &'a str,
+        txid_to_tx: &'a str,
+        partial_txid_to_txids: &'a str,
         value_receiver: &'a mut Receiver<u64>,
-        id_to_entry: DB,
+        id_to_entry: &'a str,
         lost_sats: u64,
-        number_to_id: DB,
-        outpoint_to_value: DB,
-        sat_to_inscription_id: DB,
-        satpoint_to_id: DB,
+        number_to_id: &'a str,
+        outpoint_to_value: &'a str,
+        sat_to_inscription_id: &'a str,
+        satpoint_to_id: &'a str,
         timestamp: u32,
         value_cache: &'a mut HashMap<OutPoint, u64>,
+        database: &DB,
     ) -> Result<Self> {
-        let next_number = number_to_id
+        let next_number = database
             .iter_scan(&[])
             .map(|dbrow| u64::from_le_bytes(dbrow.value.try_into().unwrap()) + 1)
             .next()
@@ -91,6 +97,7 @@ impl<'a> InscriptionUpdater<'a> {
             satpoint_to_id,
             timestamp,
             value_cache,
+            database,
         })
     }
 
@@ -108,7 +115,7 @@ impl<'a> InscriptionUpdater<'a> {
                 input_value += Height(self.height).subsidy();
             } else {
                 for (old_satpoint, inscription_id) in
-                    Index::inscriptions_on_output(self.satpoint_to_id, tx_in.previous_output)?
+                    Index::inscriptions_on_output(&self.database, tx_in.previous_output).unwrap()
                 {
                     inscriptions.push(Flotsam {
                         offset: input_value + old_satpoint.offset,
@@ -120,11 +127,9 @@ impl<'a> InscriptionUpdater<'a> {
                 input_value += if let Some(value) = self.value_cache.remove(&tx_in.previous_output)
                 {
                     value
-                } else if let Some(value) = self
-                    .outpoint_to_value
-                    .remove(&tx_in.previous_output.store())?
+                } else if let Some(value) = self.database.remove(self.outpoint_to_value.as_bytes())
                 {
-                    value.value()
+                    u64::from_le_bytes(value.try_into().unwrap())
                 } else {
                     self.value_receiver.blocking_recv().ok_or_else(|| {
                         anyhow!(
@@ -141,19 +146,22 @@ impl<'a> InscriptionUpdater<'a> {
             let previous_txid_bytes: [u8; 32] = previous_txid.into_inner();
             let mut txids_vec = vec![];
 
-            let txs = match self
-                .partial_txid_to_txids
-                .get(&previous_txid_bytes.as_slice())?
-            {
+            let txs = match self.database.get(db_key!(
+                self.partial_txid_to_txids,
+                String::from_utf8(previous_txid_bytes.to_vec()).unwrap()
+            )) {
                 Some(partial_txids) => {
-                    let txids = partial_txids.value();
+                    let txids = partial_txids;
                     let mut txs = vec![];
                     txids_vec = txids.to_vec();
                     for i in 0..txids.len() / 32 {
                         let txid = &txids[i * 32..i * 32 + 32];
-                        let tx_result = self.txid_to_tx.get(txid)?;
+                        let tx_result = self.database.get(db_key!(
+                            self.txid_to_tx,
+                            String::from_utf8(txid.to_vec()).unwrap()
+                        ));
                         let tx_result = tx_result.unwrap();
-                        let tx_buf = tx_result.value();
+                        let tx_buf = tx_result;
                         let mut cursor = std::io::Cursor::new(tx_buf);
                         let tx = bitcoin::Transaction::consensus_decode(&mut cursor)?;
                         txs.push(tx);
@@ -175,6 +183,10 @@ impl<'a> InscriptionUpdater<'a> {
                     let mut txid_vec = txid.into_inner().to_vec();
                     txids_vec.append(&mut txid_vec);
 
+                    self.database.remove(db_key!(
+                        self.partial_txid_to_txids,
+                        String::from_utf8(previous_txid_bytes.to_vec()).unwrap()
+                    ));
                     self.partial_txid_to_txids
                         .remove(&previous_txid_bytes.as_slice())?;
                     self.partial_txid_to_txids

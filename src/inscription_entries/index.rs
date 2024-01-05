@@ -2,9 +2,9 @@ use crate::{config::Config, new_index::DB};
 
 use super::*;
 
-use core::slice::SlicePattern;
 use std::{
     collections::BTreeMap,
+    convert::TryInto,
     io::Cursor,
     path::{Path, PathBuf},
 };
@@ -71,10 +71,11 @@ pub(crate) struct TransactionInfo {
 
 macro_rules! define_prefix {
     ($name:ident, $short_name:ident) => {
-        const $name: String = stringify!($short_name).to_owned();
+        const $name: &str = stringify!($short_name);
     };
 }
 
+#[macro_export]
 macro_rules! db_key {
     ($prefix:expr, $value:expr) => {
         format!("{}{}", $prefix, $value).as_bytes()
@@ -184,12 +185,10 @@ impl Index {
         &self,
         outpoint: OutPoint,
     ) -> Result<Vec<InscriptionId>> {
-        Ok(
-            Self::inscriptions_on_output(SHIT.open_table(SATPOINT_TO_INSCRIPTION_ID)?, outpoint)?
-                .into_iter()
-                .map(|(_satpoint, inscription_id)| inscription_id)
-                .collect(),
-        )
+        Ok(Self::inscriptions_on_output(&self.database, outpoint)?
+            .into_iter()
+            .map(|(_satpoint, inscription_id)| inscription_id)
+            .collect())
     }
 
     pub(crate) fn get_inscriptions(
@@ -201,8 +200,8 @@ impl Index {
             .iter_scan_from(SATPOINT_TO_INSCRIPTION_ID.as_bytes(), &[0u8; 44])
             .map(|dbrow| {
                 (
-                    Entry::load(convert_vec_to_array(dbrow.key).unwrap()),
-                    Entry::load(dbrow.value),
+                    Entry::load(dbrow.key.try_into().unwrap()),
+                    Entry::load(dbrow.value.try_into().unwrap()),
                 )
             })
             .take(n.unwrap_or(usize::MAX))
@@ -212,69 +211,23 @@ impl Index {
     pub(crate) fn get_homepage_inscriptions(&self) -> Result<Vec<InscriptionId>> {
         Ok(self
             .database
-            .begin_read()?
-            .open_table(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID)?
-            .iter()?
-            .rev()
+            .iter_scan_reverse(db_key!(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID, ""), &[])
             .take(8)
-            .map(|(_number, id)| Entry::load(*id.value()))
+            .map(|dbrow| Entry::load(dbrow.value.try_into().unwrap()))
             .collect())
-    }
-
-    pub(crate) fn get_latest_inscriptions_with_prev_and_next(
-        &self,
-        n: usize,
-        from: Option<u64>,
-    ) -> Result<(Vec<InscriptionId>, Option<u64>, Option<u64>)> {
-        let rtx = self.database.begin_read()?;
-
-        let inscription_number_to_inscription_id =
-            rtx.open_table(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID)?;
-
-        let latest = match inscription_number_to_inscription_id.iter()?.rev().next() {
-            Some((number, _id)) => number.value(),
-            None => return Ok(Default::default()),
-        };
-
-        let from = from.unwrap_or(latest);
-
-        let prev = if let Some(prev) = from.checked_sub(n.try_into()?) {
-            inscription_number_to_inscription_id
-                .get(&prev)?
-                .map(|_| prev)
-        } else {
-            None
-        };
-
-        let next = if from < latest {
-            Some(
-                from.checked_add(n.try_into()?)
-                    .unwrap_or(latest)
-                    .min(latest),
-            )
-        } else {
-            None
-        };
-
-        let inscriptions = inscription_number_to_inscription_id
-            .range(..=from)?
-            .rev()
-            .take(n)
-            .map(|(_number, id)| Entry::load(*id.value()))
-            .collect();
-
-        Ok((inscriptions, prev, next))
     }
 
     pub(crate) fn get_feed_inscriptions(&self, n: usize) -> Result<Vec<(u64, InscriptionId)>> {
         Ok(self
             .database
-            .begin_read()?
-            .open_table(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID)?
-            .iter()?
-            .rev()
+            .iter_scan_reverse(db_key!(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID, ""), &[])
             .take(n)
-            .map(|(number, id)| (number.value(), Entry::load(*id.value())))
+            .map(|dbrow| {
+                (
+                    u64::from_le_bytes(dbrow.key.try_into().unwrap()),
+                    Entry::load(dbrow.value.try_into().unwrap()),
+                )
+            })
             .collect())
     }
 
@@ -284,14 +237,28 @@ impl Index {
     ) -> Result<Option<InscriptionEntry>> {
         Ok(self
             .database
-            .begin_read()?
-            .open_table(INSCRIPTION_ID_TO_INSCRIPTION_ENTRY)?
-            .get(&inscription_id.store())?
-            .map(|value| InscriptionEntry::load(value.value())))
+            .get(db_key!(
+                INSCRIPTION_ID_TO_INSCRIPTION_ENTRY,
+                String::from_utf8(inscription_id.store().to_vec()).unwrap()
+            ))
+            .map(|value| {
+                let (part1, rest) = value.split_at(8);
+                let (part2, rest) = rest.split_at(8);
+                let (part3, rest) = rest.split_at(8);
+                let (part4, part5) = rest.split_at(16);
+
+                let value1 = u64::from_le_bytes(part1.try_into().expect("Incorrect length"));
+                let value2 = u64::from_le_bytes(part2.try_into().expect("Incorrect length"));
+                let value3 = u64::from_le_bytes(part3.try_into().expect("Incorrect length"));
+                let value4 = u128::from_le_bytes(part4.try_into().expect("Incorrect length"));
+                let value5 = u32::from_le_bytes(part5.try_into().expect("Incorrect length"));
+
+                InscriptionEntry::load((value1, value2, value3, value4, value5))
+            }))
     }
 
     pub(crate) fn inscriptions_on_output<'tx>(
-        satpoint_to_id: DB,
+        database: &'tx DB,
         outpoint: OutPoint,
     ) -> Result<impl Iterator<Item = (SatPoint, InscriptionId)> + 'tx> {
         let start = SatPoint {
@@ -300,24 +267,13 @@ impl Index {
         }
         .store();
 
-        let end = SatPoint {
-            outpoint,
-            offset: u64::MAX,
-        }
-        .store();
-
-        Ok(satpoint_to_id
-            .range::<&[u8; 44]>(&start..=&end)?
-            .map(|(satpoint, id)| (Entry::load(*satpoint.value()), Entry::load(*id.value()))))
-    }
-}
-
-fn convert_vec_to_array(slice: Vec<u8>, elements_count: usize) -> Result<[u8; 44], &'static str> {
-    if slice.len() == 44 {
-        let mut array = [0u8; 44];
-        array.copy_from_slice(slice.as_slice());
-        Ok(array)
-    } else {
-        Err("Slice is not exactly 44 elements long")
+        Ok(database
+            .iter_scan_from(db_key!(SATPOINT_TO_INSCRIPTION_ID, ""), &start)
+            .map(|dbrow| {
+                (
+                    Entry::load(dbrow.key.try_into().unwrap()),
+                    Entry::load(dbrow.value.try_into().unwrap()),
+                )
+            }))
     }
 }

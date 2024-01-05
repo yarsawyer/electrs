@@ -96,6 +96,15 @@ impl DB {
         debug!("finished full compaction on {:?}", self.db);
     }
 
+    pub fn remove(&self, key: &[u8]) -> Option<Vec<u8>> {
+        if let Some(value) = self.get(key) {
+            self.db.delete(key);
+            Some(value)
+        } else {
+            None
+        }
+    }
+
     pub fn enable_auto_compaction(&self) {
         let opts = [("disable_auto_compactions", "false")];
         self.db.set_options(&opts).unwrap();
