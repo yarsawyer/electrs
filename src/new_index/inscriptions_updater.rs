@@ -1,3 +1,4 @@
+use bitcoin::consensus::Encodable;
 use std::{
     collections::{HashMap, VecDeque},
     convert::TryInto,
@@ -71,7 +72,7 @@ impl<'a> InscriptionUpdater<'a> {
         satpoint_to_id: &'a str,
         timestamp: u32,
         value_cache: &'a mut HashMap<OutPoint, u64>,
-        database: &DB,
+        database: &'a DB,
     ) -> Result<Self> {
         let next_number = database
             .iter_scan(&[])
@@ -187,25 +188,40 @@ impl<'a> InscriptionUpdater<'a> {
                         self.partial_txid_to_txids,
                         String::from_utf8(previous_txid_bytes.to_vec()).unwrap()
                     ));
-                    self.partial_txid_to_txids
-                        .remove(&previous_txid_bytes.as_slice())?;
-                    self.partial_txid_to_txids
-                        .insert(&txid.into_inner().as_slice(), txids_vec.as_slice())?;
+                    self.database.put(
+                        db_key!(
+                            self.partial_txid_to_txids,
+                            String::from_utf8(txid.into_inner().to_vec()).unwrap()
+                        ),
+                        txids_vec.as_slice(),
+                    );
 
                     let mut tx_buf = vec![];
                     tx.consensus_encode(&mut tx_buf)?;
-                    self.txid_to_tx
-                        .insert(&txid.into_inner().as_slice(), tx_buf.as_slice())?;
+                    self.database.put(
+                        db_key!(
+                            self.txid_to_tx,
+                            String::from_utf8(txid.into_inner().to_vec()).unwrap()
+                        ),
+                        tx_buf.as_slice(),
+                    );
                 }
 
                 ParsedInscription::Complete(_inscription) => {
-                    self.partial_txid_to_txids
-                        .remove(&previous_txid_bytes.as_slice())?;
+                    self.database.remove(db_key!(
+                        self.partial_txid_to_txids,
+                        String::from_utf8(previous_txid_bytes.to_vec()).unwrap()
+                    ));
 
                     let mut tx_buf = vec![];
                     tx.consensus_encode(&mut tx_buf)?;
-                    self.txid_to_tx
-                        .insert(&txid.into_inner().as_slice(), tx_buf.as_slice())?;
+                    self.database.put(
+                        db_key!(
+                            self.txid_to_tx,
+                            String::from_utf8(txid.into_inner().to_vec()).unwrap()
+                        ),
+                        tx_buf.as_slice(),
+                    );
 
                     let mut txid_vec = txid.into_inner().to_vec();
                     txids_vec.append(&mut txid_vec);
@@ -218,8 +234,13 @@ impl<'a> InscriptionUpdater<'a> {
                             32,
                         )
                     }
-                    self.id_to_txids
-                        .insert(&inscription_id, txids_vec.as_slice())?;
+                    self.database.put(
+                        db_key!(
+                            self.id_to_txids,
+                            String::from_utf8(inscription_id.to_vec()).unwrap()
+                        ),
+                        txids_vec.as_slice(),
+                    );
 
                     let og_inscription_id = InscriptionId {
                         txid: Txid::from_slice(&txids_vec[0..32]).unwrap(),
@@ -315,11 +336,16 @@ impl<'a> InscriptionUpdater<'a> {
 
         match flotsam.origin {
             Origin::Old(old_satpoint) => {
-                self.satpoint_to_id.remove(&old_satpoint.store())?;
+                self.database.remove(db_key!(
+                    self.sat_to_inscription_id,
+                    String::from_utf8(old_satpoint.store().to_vec()).unwrap()
+                ));
             }
             Origin::New(fee) => {
-                self.number_to_id
-                    .insert(&self.next_number, &inscription_id)?;
+                self.database.put(
+                    db_key!(self.number_to_id, self.next_number),
+                    inscription_id.as_slice(),
+                );
 
                 let mut sat = None;
                 if let Some(input_sat_ranges) = input_sat_ranges {
@@ -328,7 +354,10 @@ impl<'a> InscriptionUpdater<'a> {
                         let size = end - start;
                         if offset + size > flotsam.offset as u128 {
                             let n = start + flotsam.offset as u128 - offset;
-                            self.sat_to_inscription_id.insert(&n, &inscription_id)?;
+                            self.database.put(
+                                db_key!(self.sat_to_inscription_id, n),
+                                inscription_id.as_slice(),
+                            );
                             sat = Some(Sat(n));
                             break;
                         }
@@ -336,17 +365,22 @@ impl<'a> InscriptionUpdater<'a> {
                     }
                 }
 
-                self.id_to_entry.insert(
-                    &inscription_id,
-                    &InscriptionEntry {
-                        fee,
-                        height: self.height,
-                        number: self.next_number,
-                        sat,
-                        timestamp: self.timestamp,
-                    }
-                    .store(),
-                )?;
+                self.database.put(
+                    db_key!(
+                        self.id_to_entry,
+                        String::from_utf8(inscription_id.to_vec()).unwrap()
+                    ),
+                    &tuple_to_bytes(
+                        &InscriptionEntry {
+                            fee,
+                            height: self.height,
+                            number: self.next_number,
+                            sat,
+                            timestamp: self.timestamp,
+                        }
+                        .store(),
+                    ),
+                );
 
                 self.next_number += 1;
             }
@@ -354,9 +388,31 @@ impl<'a> InscriptionUpdater<'a> {
 
         let new_satpoint = new_satpoint.store();
 
-        self.satpoint_to_id.insert(&new_satpoint, &inscription_id)?;
-        self.id_to_satpoint.insert(&inscription_id, &new_satpoint)?;
+        self.database.put(
+            db_key!(
+                self.sat_to_inscription_id,
+                String::from_utf8(new_satpoint.to_vec()).unwrap()
+            ),
+            inscription_id.as_slice(),
+        );
+        self.database.put(
+            db_key!(
+                self.id_to_satpoint,
+                String::from_utf8(inscription_id.to_vec()).unwrap()
+            ),
+            new_satpoint.as_slice(),
+        );
 
         Ok(())
     }
+}
+
+fn tuple_to_bytes(tup: &(u64, u64, u64, u128, u32)) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&tup.0.to_le_bytes());
+    bytes.extend_from_slice(&tup.1.to_le_bytes());
+    bytes.extend_from_slice(&tup.2.to_le_bytes());
+    bytes.extend_from_slice(&tup.3.to_le_bytes());
+    bytes.extend_from_slice(&tup.4.to_le_bytes());
+    bytes
 }
