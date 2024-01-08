@@ -121,11 +121,11 @@ impl Mempool {
         scripthash: &[u8],
         last_seen_txid: Option<&Txid>,
         limit: usize,
-    ) -> Vec<Transaction> {
+    ) -> Result<Vec<Transaction>> {
         let _timer = self.latency.with_label_values(&["history"]).start_timer();
         self.history
             .get(scripthash)
-            .map_or_else(std::vec::Vec::new, |entries| {
+            .map_or_else( || Ok(std::vec::Vec::new()), |entries| {
                 self._history(entries, last_seen_txid, limit)
             })
     }
@@ -142,7 +142,7 @@ impl Mempool {
         entries: &[TxHistoryInfo],
         last_seen_txid: Option<&Txid>,
         limit: usize,
-    ) -> Vec<Transaction> {
+    ) -> Result<Vec<Transaction>> {
         entries
             .iter()
             .map(|e| e.get_txid())
@@ -157,9 +157,8 @@ impl Mempool {
                 None => 0,
             })
             .take(limit)
-            .map(|txid| self.txstore.get(&txid).expect("missing mempool tx"))
-            .cloned()
-            .collect()
+            .map(|txid| self.txstore.get(&txid).cloned().chain_err(|| "missing mempool tx"))
+            .try_collect()
     }
 
     pub fn history_txids(&self, scripthash: &[u8], limit: usize) -> Vec<Txid> {
@@ -178,28 +177,31 @@ impl Mempool {
         }
     }
 
-    pub fn utxo(&self, scripthash: &[u8]) -> Vec<Utxo> {
+    pub fn utxo(&self, scripthash: &[u8]) -> Result<Vec<Utxo>> {
         let _timer = self.latency.with_label_values(&["utxo"]).start_timer();
         let entries = match self.history.get(scripthash) {
-            None => return vec![],
+            None => return Ok(vec![]),
             Some(entries) => entries,
         };
 
-        entries
-            .iter()
-            .filter_map(|entry| match entry {
-                TxHistoryInfo::Funding(info) => {
-                    Some(Utxo {
-                        txid: deserialize(&info.txid).expect("invalid txid"),
-                        vout: info.vout as u32,
-                        value: info.value,
-                        confirmed: None,
-                    })
-                }
-                TxHistoryInfo::Spending(_) => None,
-            })
-            .filter(|utxo| !self.has_spend(&OutPoint::from(utxo)))
-            .collect()
+        let mut utxo = vec![];
+        for entry in entries {
+            let TxHistoryInfo::Funding(info) = entry else { continue };
+
+            let txid = deserialize(&info.txid)
+                .map_err(|e| format!("invalid txid: {:?}. {e:?}", info.txid))?;
+            let v = Utxo {
+                txid,
+                vout: info.vout as u32,
+                value: info.value,
+                confirmed: None,
+            };
+
+            if !self.has_spend(&OutPoint::from(&v)) {
+                utxo.push(v); 
+            }
+        }
+        Ok(utxo)
     }
 
     // @XXX avoid code duplication with ChainQuery::stats()?

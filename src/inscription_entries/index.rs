@@ -1,4 +1,6 @@
-use crate::{config::Config, new_index::DB};
+use itertools::Itertools;
+
+use crate::{config::Config, new_index::DB, util::errors::AsAnyhow};
 
 use super::*;
 
@@ -102,33 +104,37 @@ impl InscriptionIndex {
     }
 
     pub(crate) fn get_inscription_id_by_sat(&self, sat: Sat) -> Result<Option<InscriptionId>> {
-        Ok(self
-            .database
-            .get(db_key!(SAT_TO_INSCRIPTION_ID, sat.n()))
-            .and_then(|v| InscriptionId::from_str(&String::from_utf8(v).unwrap()).ok()))
+        let Some(v) = self.database.get(db_key!(SAT_TO_INSCRIPTION_ID, sat.n())) else { return Ok(None) };
+        let v = String::from_utf8(v).track_err()?;
+        Ok(InscriptionId::from_str(&v).map(Some).track_err()?)
     }
 
     pub(crate) fn get_inscription_id_by_inscription_number(
         &self,
         n: u64,
     ) -> Result<Option<InscriptionId>> {
-        Ok(self
-            .database
-            .get(db_key!(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID, n))
-            .and_then(|v| InscriptionId::from_str(&String::from_utf8(v).unwrap()).ok()))
+        let Some(v) = self.database.get(db_key!(
+            INSCRIPTION_NUMBER_TO_INSCRIPTION_ID,n
+        )) else { return Ok(None) };
+
+        let v = String::from_utf8(v).track_err()?;
+        Ok(InscriptionId::from_str(&v).map(Some).track_err()?)
     }
 
     pub(crate) fn get_inscription_satpoint_by_id(
         &self,
         inscription_id: InscriptionId,
     ) -> Result<Option<SatPoint>> {
-        Ok(self
-            .database
-            .get(db_key!(
-                INSCRIPTION_ID_TO_SATPOINT,
-                String::from_utf8(inscription_id.store().to_vec()).unwrap()
-            ))
-            .and_then(|v| SatPoint::from_str(&String::from_utf8(v).unwrap()).ok()))
+        let Some(v) = self.database.get(db_key!(
+            INSCRIPTION_ID_TO_SATPOINT,
+            String::from_utf8(inscription_id.store()
+                .track_err()?
+                .to_vec())
+                .track_err()?
+        )) else { return Ok(None) };
+
+        let v = String::from_utf8(v).track_err()?;
+        Ok(SatPoint::from_str(&v).map(Some).track_err()?)
     }
 
     pub(crate) fn get_inscription_by_id(
@@ -139,7 +145,7 @@ impl InscriptionIndex {
             .database
             .get(db_key!(
                 INSCRIPTION_ID_TO_SATPOINT,
-                String::from_utf8(inscription_id.store().to_vec()).unwrap()
+                String::from_utf8(inscription_id.store().track_err()?.to_vec()).track_err()?
             ))
             .is_none()
         {
@@ -148,7 +154,7 @@ impl InscriptionIndex {
 
         let txids_result = self.database.get(db_key!(
             INSCRIPTION_ID_TO_TXIDS,
-            String::from_utf8(inscription_id.store().to_vec()).unwrap()
+            String::from_utf8(inscription_id.store().track_err()?.to_vec()).track_err()?
         ));
 
         match txids_result {
@@ -159,7 +165,7 @@ impl InscriptionIndex {
                     let txid_buf = &txids[i * 32..i * 32 + 32];
                     let tx_result = self.database.get(db_key!(
                         INSCRIPTION_TXID_TO_TX,
-                        String::from_utf8(txid_buf.to_vec()).unwrap()
+                        String::from_utf8(txid_buf.to_vec()).track_err()?
                     ));
 
                     match tx_result {
@@ -189,95 +195,93 @@ impl InscriptionIndex {
         &self,
         outpoint: OutPoint,
     ) -> Result<Vec<InscriptionId>> {
-        Ok(Self::inscriptions_on_output(&self.database, outpoint)?
+        Self::inscriptions_on_output(&self.database, outpoint)?
             .into_iter()
-            .map(|(_satpoint, inscription_id)| inscription_id)
-            .collect())
+            .map(|x| x.map(|(_sat_point, inscription_id)| inscription_id))
+            .try_collect().track_err()
     }
 
     pub(crate) fn get_inscriptions(
         &self,
         n: Option<usize>,
     ) -> Result<BTreeMap<SatPoint, InscriptionId>> {
-        Ok(self
+        self
             .database
             .iter_scan_from(SATPOINT_TO_INSCRIPTION_ID.as_bytes(), &[0u8; 44])
             .map(|dbrow| {
-                (
-                    Entry::load(dbrow.key.try_into().unwrap()),
-                    Entry::load(dbrow.value.try_into().unwrap()),
-                )
+                Ok::<_,anyhow::Error>((
+                    Entry::load(dbrow.key.try_into().track_err()?).track_err()?,
+                    Entry::load(dbrow.value.try_into().track_err()?).track_err()?,
+                ))
             })
             .take(n.unwrap_or(usize::MAX))
-            .collect())
+            .try_collect()
     }
 
     pub(crate) fn get_homepage_inscriptions(&self) -> Result<Vec<InscriptionId>> {
-        Ok(self
+        self
             .database
             .iter_scan_reverse(db_key!(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID, ""), &[])
             .take(8)
-            .map(|dbrow| Entry::load(dbrow.value.try_into().unwrap()))
-            .collect())
+            .map(|dbrow| Entry::load(dbrow.value.try_into().track_err()?).track_err())
+            .try_collect()
     }
 
     pub(crate) fn get_feed_inscriptions(&self, n: usize) -> Result<Vec<(u64, InscriptionId)>> {
-        Ok(self
+        self
             .database
             .iter_scan_reverse(db_key!(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID, ""), &[])
             .take(n)
             .map(|dbrow| {
-                (
-                    u64::from_le_bytes(dbrow.key.try_into().unwrap()),
-                    Entry::load(dbrow.value.try_into().unwrap()),
-                )
+                Ok::<_,anyhow::Error>((
+                    u64::from_le_bytes(dbrow.key.try_into().track_err()?),
+                    Entry::load(dbrow.value.try_into().track_err()?).track_err()?,
+                ))
             })
-            .collect())
+            .try_collect()
+            .track_err()
     }
 
     pub(crate) fn get_inscription_entry(
         &self,
         inscription_id: InscriptionId,
     ) -> Result<Option<InscriptionEntry>> {
-        Ok(self
+        let Some(value) = self
             .database
             .get(db_key!(
                 INSCRIPTION_ID_TO_INSCRIPTION_ENTRY,
-                String::from_utf8(inscription_id.store().to_vec()).unwrap()
-            ))
-            .map(|value| {
-                let (part1, rest) = value.split_at(8);
-                let (part2, rest) = rest.split_at(8);
-                let (part3, rest) = rest.split_at(8);
-                let (part4, part5) = rest.split_at(16);
+                String::from_utf8(inscription_id.store().track_err()?.to_vec()).track_err()?
+        )) else { return Ok(None) };
 
-                let value1 = u64::from_le_bytes(part1.try_into().expect("Incorrect length"));
-                let value2 = u64::from_le_bytes(part2.try_into().expect("Incorrect length"));
-                let value3 = u64::from_le_bytes(part3.try_into().expect("Incorrect length"));
-                let value4 = u128::from_le_bytes(part4.try_into().expect("Incorrect length"));
-                let value5 = u32::from_le_bytes(part5.try_into().expect("Incorrect length"));
-
-                InscriptionEntry::load((value1, value2, value3, value4, value5))
-            }))
+        let (part1, rest) = value.split_at(8);
+        let (part2, rest) = rest.split_at(8);
+        let (part3, rest) = rest.split_at(8);
+        let (part4, part5) = rest.split_at(16);            
+        let value1 = u64::from_le_bytes(part1.try_into().anyhow_as("Incorrect length")?);
+        let value2 = u64::from_le_bytes(part2.try_into().anyhow_as("Incorrect length")?);
+        let value3 = u64::from_le_bytes(part3.try_into().anyhow_as("Incorrect length")?);
+        let value4 = u128::from_le_bytes(part4.try_into().anyhow_as("Incorrect length")?);
+        let value5 = u32::from_le_bytes(part5.try_into().anyhow_as("Incorrect length")?);
+        InscriptionEntry::load((value1, value2, value3, value4, value5)).track_err().map(Some)
     }
 
     pub(crate) fn inscriptions_on_output<'tx>(
         database: &'tx DB,
         outpoint: OutPoint,
-    ) -> Result<impl Iterator<Item = (SatPoint, InscriptionId)> + 'tx> {
+    ) -> Result<impl Iterator<Item = Result<(SatPoint, InscriptionId)>> + 'tx> {
         let start = SatPoint {
             outpoint,
             offset: 0,
         }
-        .store();
+        .store().track_err()?;
 
         Ok(database
             .iter_scan_from(db_key!(SATPOINT_TO_INSCRIPTION_ID, ""), &start)
             .map(|dbrow| {
-                (
-                    Entry::load(dbrow.key.try_into().unwrap()),
-                    Entry::load(dbrow.value.try_into().unwrap()),
-                )
+                Ok((
+                    Entry::load(dbrow.key.try_into().track_err()?).track_err()?,
+                    Entry::load(dbrow.value.try_into().track_err()?).track_err()?,
+                ))
             }))
     }
 }

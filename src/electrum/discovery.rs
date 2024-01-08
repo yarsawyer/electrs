@@ -4,7 +4,7 @@ use std::convert::TryInto;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,10 +28,10 @@ const MAX_SERVICES_PER_REQUEST: usize = 6; // maximum number of services added p
 #[derive(Debug)]
 pub struct DiscoveryManager {
     /// A queue of scheduled health check jobs, including for healthy, unhealthy and untested servers
-    queue: RwLock<BinaryHeap<HealthCheck>>,
+    queue: parking_lot::RwLock<BinaryHeap<HealthCheck>>,
 
     /// A list of servers that were found to be healthy on their last health check
-    healthy: RwLock<HashMap<ServerAddr, Server>>,
+    healthy: parking_lot::RwLock<HashMap<ServerAddr, Server>>,
 
     /// Used to test for protocol version compatibility
     our_version: ProtocolVersion,

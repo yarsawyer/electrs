@@ -10,7 +10,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
@@ -186,7 +186,7 @@ impl Connection {
             .chain_err(|| "discovery is disabled")?;
 
         let features = params
-            .get(0)
+            .first()
             .chain_err(|| "missing features param")?
             .clone();
         let features = serde_json::from_value(features).chain_err(|| "invalid features")?;
@@ -200,7 +200,7 @@ impl Connection {
     }
 
     fn blockchain_block_header(&self, params: &[Value]) -> Result<Value> {
-        let height = usize_from_value(params.get(0), "height")?;
+        let height = usize_from_value(params.first(), "height")?;
         let cp_height = usize_from_value_or(params.get(1), "cp_height", 0)?;
 
         let raw_header_hex: String = self
@@ -223,7 +223,7 @@ impl Connection {
     }
 
     fn blockchain_block_headers(&self, params: &[Value]) -> Result<Value> {
-        let start_height = usize_from_value(params.get(0), "start_height")?;
+        let start_height = usize_from_value(params.first(), "start_height")?;
         let count = MAX_HEADERS.min(usize_from_value(params.get(1), "count")?);
         let cp_height = usize_from_value_or(params.get(2), "cp_height", 0)?;
         let heights: Vec<usize> = (start_height..(start_height + count)).collect();
@@ -258,7 +258,7 @@ impl Connection {
     }
 
     fn blockchain_estimatefee(&self, params: &[Value]) -> Result<Value> {
-        let conf_target = usize_from_value(params.get(0), "blocks_count")?;
+        let conf_target = usize_from_value(params.first(), "blocks_count")?;
         let fee_rate = self
             .query
             .estimate_fee(conf_target as u16)
@@ -274,7 +274,7 @@ impl Connection {
     }
 
     fn blockchain_scripthash_subscribe(&mut self, params: &[Value]) -> Result<Value> {
-        let script_hash = hash_from_value(params.get(0)).chain_err(|| "bad script_hash")?;
+        let script_hash = hash_from_value(params.first()).chain_err(|| "bad script_hash")?;
 
         let history_txids = get_history(&self.query, &script_hash[..], self.txs_limit)?;
         let status_hash = get_status_hash(history_txids, &self.query)
@@ -291,7 +291,7 @@ impl Connection {
     }
 
     fn blockchain_scripthash_get_balance(&self, params: &[Value]) -> Result<Value> {
-        let script_hash = hash_from_value(params.get(0)).chain_err(|| "bad script_hash")?;
+        let script_hash = hash_from_value(params.first()).chain_err(|| "bad script_hash")?;
         let (chain_stats, mempool_stats) = self.query.stats(&script_hash[..]);
 
         Ok(json!({
@@ -301,7 +301,7 @@ impl Connection {
     }
 
     fn blockchain_scripthash_get_history(&self, params: &[Value]) -> Result<Value> {
-        let script_hash = hash_from_value(params.get(0)).chain_err(|| "bad script_hash")?;
+        let script_hash = hash_from_value(params.first()).chain_err(|| "bad script_hash")?;
         let history_txids = get_history(&self.query, &script_hash[..], self.txs_limit)?;
 
         Ok(json!(history_txids
@@ -319,7 +319,7 @@ impl Connection {
     }
 
     fn blockchain_scripthash_listunspent(&self, params: &[Value]) -> Result<Value> {
-        let script_hash = hash_from_value(params.get(0)).chain_err(|| "bad script_hash")?;
+        let script_hash = hash_from_value(params.first()).chain_err(|| "bad script_hash")?;
         let utxos = self.query.utxo(&script_hash[..])?;
 
         let to_json = |utxo: Utxo| {
@@ -339,7 +339,7 @@ impl Connection {
     }
 
     fn blockchain_transaction_broadcast(&self, params: &[Value]) -> Result<Value> {
-        let tx = params.get(0).chain_err(|| "missing tx")?;
+        let tx = params.first().chain_err(|| "missing tx")?;
         let tx = tx.as_str().chain_err(|| "non-string tx")?.to_string();
         let txid = self.query.broadcast_raw(&tx)?;
         if let Err(e) = self.chan.sender().try_send(Message::PeriodicUpdate) {
@@ -349,7 +349,7 @@ impl Connection {
     }
 
     fn blockchain_transaction_get(&self, params: &[Value]) -> Result<Value> {
-        let tx_hash = Txid::from(hash_from_value(params.get(0)).chain_err(|| "bad tx_hash")?);
+        let tx_hash = Txid::from(hash_from_value(params.first()).chain_err(|| "bad tx_hash")?);
         let verbose = match params.get(1) {
             Some(value) => value.as_bool().chain_err(|| "non-bool verbose value")?,
             None => false,
@@ -368,7 +368,7 @@ impl Connection {
     }
 
     fn blockchain_transaction_get_merkle(&self, params: &[Value]) -> Result<Value> {
-        let txid = Txid::from(hash_from_value(params.get(0)).chain_err(|| "bad tx_hash")?);
+        let txid = Txid::from(hash_from_value(params.first()).chain_err(|| "bad tx_hash")?);
         let height = usize_from_value(params.get(1), "height")?;
         let blockid = self
             .query
@@ -387,7 +387,7 @@ impl Connection {
     }
 
     fn blockchain_transaction_id_from_pos(&self, params: &[Value]) -> Result<Value> {
-        let height = usize_from_value(params.get(0), "height")?;
+        let height = usize_from_value(params.first(), "height")?;
         let tx_pos = usize_from_value(params.get(1), "tx_pos")?;
         let want_merkle = bool_from_value_or(params.get(2), "merkle", false)?;
 
@@ -662,13 +662,13 @@ struct Stats {
 impl RPC {
     fn start_notifier(
         notification: Channel<Notification>,
-        senders: Arc<Mutex<Vec<crossbeam_channel::Sender<Message>>>>,
+        senders: Arc<parking_lot::Mutex<Vec<crossbeam_channel::Sender<Message>>>>,
         acceptor: Sender<Option<ConnectionStream>>,
         acceptor_shutdown: Sender<()>,
     ) {
         spawn_thread("notification", move || {
             for msg in notification.receiver().iter() {
-                let mut senders = senders.lock().unwrap();
+                let mut senders = senders.lock();
                 match msg {
                     Notification::Periodic => {
                         for sender in senders.split_off(0) {
@@ -759,7 +759,7 @@ impl RPC {
             notification: notification.sender(),
             server: Some(spawn_thread("rpc", move || {
                 let senders =
-                    Arc::new(Mutex::new(Vec::<crossbeam_channel::Sender<Message>>::new()));
+                    Arc::new(parking_lot::Mutex::new(Vec::<crossbeam_channel::Sender<Message>>::new()));
 
                 let acceptor_shutdown = Channel::unbounded();
                 let acceptor_shutdown_sender = acceptor_shutdown.sender();
@@ -801,7 +801,7 @@ impl RPC {
                             #[cfg(feature = "electrum-discovery")]
                             discovery,
                         );
-                        senders.lock().unwrap().push(conn.chan.sender());
+                        senders.lock().push(conn.chan.sender());
                         conn.run();
                         info!("[{}] disconnected peer", addr);
                         let _ = killer_clone.send(());
@@ -824,8 +824,8 @@ impl RPC {
                 drop(acceptor);
                 drop(garbage_receiver);
 
-                trace!("closing {} RPC connections", senders.lock().unwrap().len());
-                for sender in senders.lock().unwrap().iter() {
+                trace!("closing {} RPC connections", senders.lock().len());
+                for sender in senders.lock().iter() {
                     let _ = sender.try_send(Message::Done);
                 }
 

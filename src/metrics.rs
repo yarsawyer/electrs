@@ -110,7 +110,7 @@ fn parse_stats() -> Result<Stats> {
     let parts: Vec<&str> = value.split_whitespace().collect();
     let page_size = page_size::get() as u64;
     let ticks_per_second = sysconf::raw::sysconf(sysconf::raw::SysconfVariable::ScClkTck)
-        .expect("failed to get _SC_CLK_TCK") as f64;
+        .map_err(|e| format!("failed to get _SC_CLK_TCK: {e:?}"))? as f64;
 
     let parse_part = |index: usize, name: &str| -> Result<u64> {
         parts

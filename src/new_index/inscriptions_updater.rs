@@ -15,7 +15,7 @@ use crate::{
         inscription::ParsedInscription,
         inscription_id::InscriptionId,
         Sat, SatPoint,
-    },
+    }, util::errors::AsAnyhow,
 };
 use anyhow::{anyhow, Result};
 use bitcoin::consensus::Decodable;
@@ -50,7 +50,7 @@ pub(crate) struct InscriptionUpdater<'a> {
     sat_to_inscription_id: &'a str,
     satpoint_to_id: &'a str,
     timestamp: u32,
-    value_cache: &'a RwLock<HashMap<OutPoint, u64>>,
+    value_cache: &'a parking_lot::RwLock<HashMap<OutPoint, u64>>,
     database: &'a DB,
 }
 
@@ -68,12 +68,12 @@ impl<'a> InscriptionUpdater<'a> {
         sat_to_inscription_id: &'a str,
         satpoint_to_id: &'a str,
         timestamp: u32,
-        value_cache: &'a RwLock<HashMap<OutPoint, u64>>,
+        value_cache: &'a parking_lot::RwLock<HashMap<OutPoint, u64>>,
         database: &'a DB,
     ) -> Result<Self> {
         let next_number = database
             .iter_scan(db_key!(NUMBER_TO_ID, ""))
-            .map(|dbrow| u64::from_le_bytes(dbrow.value.try_into().unwrap()) + 1)
+            .map(|dbrow| dbrow.value.try_into().map(|x|u64::from_le_bytes(x)+1).unwrap_or(0))
             .next()
             .unwrap_or(0);
 
@@ -111,10 +111,11 @@ impl<'a> InscriptionUpdater<'a> {
             if tx_in.previous_output.is_null() {
                 input_value += Height(self.height).subsidy();
             } else {
-                for (old_satpoint, inscription_id) in
-                    InscriptionIndex::inscriptions_on_output(&self.database, tx_in.previous_output)
-                        .unwrap()
+                for bibas in
+                    InscriptionIndex::inscriptions_on_output(self.database, tx_in.previous_output).track_err()?
                 {
+                    let (old_satpoint, inscription_id) = bibas.track_err()?;
+
                     inscriptions.push(Flotsam {
                         offset: input_value + old_satpoint.offset,
                         inscription_id,
@@ -125,15 +126,14 @@ impl<'a> InscriptionUpdater<'a> {
                 input_value += if let Some(value) = self
                     .value_cache
                     .write()
-                    .unwrap()
                     .remove(&tx_in.previous_output)
                 {
                     value
                 } else if let Some(value) = self.database.remove(db_key!(
                     self.outpoint_to_value,
-                    String::from_utf8(tx_in.previous_output.store().to_vec()).unwrap()
+                    String::from_utf8(tx_in.previous_output.store().track_err()?.to_vec()).track_err()?
                 )) {
-                    u64::from_le_bytes(value.try_into().unwrap())
+                    u64::from_le_bytes(value.try_into().track_err()?)
                 } else {
                     return Err(anyhow!(
                         "failed to get transaction for {}",
@@ -150,7 +150,7 @@ impl<'a> InscriptionUpdater<'a> {
 
             let txs = match self.database.get(db_key!(
                 self.partial_txid_to_txids,
-                String::from_utf8(previous_txid_bytes.to_vec()).unwrap()
+                String::from_utf8(previous_txid_bytes.to_vec()).track_err()?
             )) {
                 Some(partial_txids) => {
                     let txids = partial_txids;
@@ -160,9 +160,9 @@ impl<'a> InscriptionUpdater<'a> {
                         let txid = &txids[i * 32..i * 32 + 32];
                         let tx_result = self.database.get(db_key!(
                             self.txid_to_tx,
-                            String::from_utf8(txid.to_vec()).unwrap()
+                            String::from_utf8(txid.to_vec()).track_err()?
                         ));
-                        let tx_result = tx_result.unwrap();
+                        let tx_result = tx_result.track_err()?;
                         let tx_buf = tx_result;
                         let mut cursor = std::io::Cursor::new(tx_buf);
                         let tx = bitcoin::Transaction::consensus_decode(&mut cursor)?;
@@ -187,12 +187,12 @@ impl<'a> InscriptionUpdater<'a> {
 
                     self.database.remove(db_key!(
                         self.partial_txid_to_txids,
-                        String::from_utf8(previous_txid_bytes.to_vec()).unwrap()
+                        String::from_utf8(previous_txid_bytes.to_vec()).track_err()?
                     ));
                     self.database.put(
                         db_key!(
                             self.partial_txid_to_txids,
-                            String::from_utf8(txid.into_inner().to_vec()).unwrap()
+                            String::from_utf8(txid.into_inner().to_vec()).track_err()?
                         ),
                         txids_vec.as_slice(),
                     );
@@ -202,7 +202,7 @@ impl<'a> InscriptionUpdater<'a> {
                     self.database.put(
                         db_key!(
                             self.txid_to_tx,
-                            String::from_utf8(txid.into_inner().to_vec()).unwrap()
+                            String::from_utf8(txid.into_inner().to_vec()).track_err()?
                         ),
                         tx_buf.as_slice(),
                     );
@@ -211,7 +211,7 @@ impl<'a> InscriptionUpdater<'a> {
                 ParsedInscription::Complete(_inscription) => {
                     self.database.remove(db_key!(
                         self.partial_txid_to_txids,
-                        String::from_utf8(previous_txid_bytes.to_vec()).unwrap()
+                        String::from_utf8(previous_txid_bytes.to_vec()).track_err()?
                     ));
 
                     let mut tx_buf = vec![];
@@ -219,7 +219,7 @@ impl<'a> InscriptionUpdater<'a> {
                     self.database.put(
                         db_key!(
                             self.txid_to_tx,
-                            String::from_utf8(txid.into_inner().to_vec()).unwrap()
+                            String::from_utf8(txid.into_inner().to_vec()).track_err()?
                         ),
                         tx_buf.as_slice(),
                     );
@@ -238,13 +238,13 @@ impl<'a> InscriptionUpdater<'a> {
                     self.database.put(
                         db_key!(
                             self.id_to_txids,
-                            String::from_utf8(inscription_id.to_vec()).unwrap()
+                            String::from_utf8(inscription_id.to_vec()).track_err()?
                         ),
                         txids_vec.as_slice(),
                     );
 
                     let og_inscription_id = InscriptionId {
-                        txid: Txid::from_slice(&txids_vec[0..32]).unwrap(),
+                        txid: Txid::from_slice(&txids_vec[0..32]).track_err()?,
                         index: 0,
                     };
 
@@ -284,23 +284,23 @@ impl<'a> InscriptionUpdater<'a> {
                 let new_satpoint = SatPoint {
                     outpoint: OutPoint {
                         txid,
-                        vout: vout.try_into().unwrap(),
+                        vout: vout.try_into().track_err()?,
                     },
                     offset: flotsam.offset - output_value,
                 };
 
                 self.update_inscription_location(
                     input_sat_ranges,
-                    inscriptions.next().unwrap(),
+                    inscriptions.next().track_err()?,
                     new_satpoint,
                 )?;
             }
 
             output_value = end;
 
-            self.value_cache.write().unwrap().insert(
+            self.value_cache.write().insert(
                 OutPoint {
-                    vout: vout.try_into().unwrap(),
+                    vout: vout.try_into().track_err()?,
                     txid,
                 },
                 tx_out.value,
@@ -334,13 +334,13 @@ impl<'a> InscriptionUpdater<'a> {
         flotsam: Flotsam,
         new_satpoint: SatPoint,
     ) -> Result<()> {
-        let inscription_id = flotsam.inscription_id.store();
+        let inscription_id = flotsam.inscription_id.store().track_err()?;
 
         match flotsam.origin {
             Origin::Old(old_satpoint) => {
                 self.database.remove(db_key!(
                     self.sat_to_inscription_id,
-                    String::from_utf8(old_satpoint.store().to_vec()).unwrap()
+                    String::from_utf8(old_satpoint.store().track_err()?.to_vec()).track_err()?
                 ));
             }
             Origin::New(fee) => {
@@ -370,7 +370,7 @@ impl<'a> InscriptionUpdater<'a> {
                 self.database.put(
                     db_key!(
                         self.id_to_entry,
-                        String::from_utf8(inscription_id.to_vec()).unwrap()
+                        String::from_utf8(inscription_id.to_vec()).track_err()?
                     ),
                     &tuple_to_bytes(
                         &InscriptionEntry {
@@ -380,7 +380,7 @@ impl<'a> InscriptionUpdater<'a> {
                             sat,
                             timestamp: self.timestamp,
                         }
-                        .store(),
+                        .store().track_err()?,
                     ),
                 );
 
@@ -388,19 +388,19 @@ impl<'a> InscriptionUpdater<'a> {
             }
         }
 
-        let new_satpoint = new_satpoint.store();
+        let new_satpoint = new_satpoint.store().track_err()?;
 
         self.database.put(
             db_key!(
                 self.sat_to_inscription_id,
-                String::from_utf8(new_satpoint.to_vec()).unwrap()
+                String::from_utf8(new_satpoint.to_vec()).track_err()?
             ),
             inscription_id.as_slice(),
         );
         self.database.put(
             db_key!(
                 self.id_to_satpoint,
-                String::from_utf8(inscription_id.to_vec()).unwrap()
+                String::from_utf8(inscription_id.to_vec()).track_err()?
             ),
             new_satpoint.as_slice(),
         );

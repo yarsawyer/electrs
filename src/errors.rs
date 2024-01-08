@@ -28,6 +28,13 @@ error_chain! {
     }
 }
 
+impl From<anyhow::Error> for Error {
+    fn from(value: anyhow::Error) -> Self {
+        value.to_string().into()
+    }
+}
+
+
 #[cfg(feature = "electrum-discovery")]
 impl From<electrum_client::Error> for Error {
     fn from(e: electrum_client::Error) -> Self {

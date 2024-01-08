@@ -2,6 +2,9 @@ use crate::chain::{BlockHash, Txid};
 use crate::errors::*;
 use crate::new_index::ChainQuery;
 use bitcoin::hashes::{sha256d::Hash as Sha256dHash, Hash};
+use itertools::Itertools;
+
+use super::errors::AsAnyhow;
 
 pub fn get_tx_merkle_proof(
     chain: &ChainQuery,
@@ -10,7 +13,8 @@ pub fn get_tx_merkle_proof(
 ) -> Result<(Vec<Sha256dHash>, usize)> {
     let txids = chain
         .get_block_txids(block_hash)
-        .chain_err(|| format!("missing block txids for #{}", block_hash))?;
+        .chain_err(|| format!("missing block txids for #{}", block_hash))?
+        .track_err()?;
     let pos = txids
         .iter()
         .position(|txid| txid == tx_hash)
@@ -62,7 +66,8 @@ pub fn get_id_from_pos(
 
     let txids = chain
         .get_block_txids(&header_hash)
-        .chain_err(|| format!("missing block txids #{}", height))?;
+        .chain_err(|| format!("missing block txids #{}", height))?
+        .track_err()?;
 
     let txid = *txids
         .get(tx_pos)
