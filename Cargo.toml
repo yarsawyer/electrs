@@ -59,6 +59,7 @@ regex = "1.6.0"
 html-escaper = "0.2.0"
 derive_more = "0.99.17"
 anyhow = { version = "1.0.56", features = ["backtrace"] }
+parking_lot = "0.12.1"
 
 # optional dependencies for electrum-discovery
 electrum-client = { version = "0.8", optional = true }

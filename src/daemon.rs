@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64;
@@ -20,6 +20,7 @@ use crate::signal::Waiter;
 use crate::util::HeaderList;
 
 use crate::errors::*;
+use crate::util::errors::AsAnyhow;
 
 fn parse_hash<T>(value: &Value) -> Result<T>
 where
@@ -240,18 +241,18 @@ impl Connection {
 }
 
 struct Counter {
-    value: Mutex<u64>,
+    value: parking_lot::Mutex<u64>,
 }
 
 impl Counter {
     fn new() -> Self {
         Counter {
-            value: Mutex::new(0),
+            value: parking_lot::Mutex::new(0),
         }
     }
 
     fn next(&self) -> u64 {
-        let mut value = self.value.lock().unwrap();
+        let mut value = self.value.lock();
         *value += 1;
         *value
     }
@@ -261,7 +262,7 @@ pub struct Daemon {
     daemon_dir: PathBuf,
     blocks_dir: PathBuf,
     network: Network,
-    conn: Mutex<Connection>,
+    conn: parking_lot::Mutex<Connection>,
     message_id: Counter, // for monotonic JSONRPC 'id'
     signal: Waiter,
 
@@ -284,7 +285,7 @@ impl Daemon {
             daemon_dir,
             blocks_dir,
             network,
-            conn: Mutex::new(Connection::new(
+            conn: parking_lot::Mutex::new(Connection::new(
                 daemon_rpc_addr,
                 cookie_getter,
                 signal.clone(),
@@ -352,7 +353,7 @@ impl Daemon {
             daemon_dir: self.daemon_dir.clone(),
             blocks_dir: self.blocks_dir.clone(),
             network: self.network,
-            conn: Mutex::new(self.conn.lock().unwrap().reconnect()?),
+            conn: parking_lot::Mutex::new(self.conn.lock().reconnect()?),
             message_id: Counter::new(),
             signal: self.signal.clone(),
             latency: self.latency.clone(),
@@ -363,10 +364,9 @@ impl Daemon {
     pub fn list_blk_files(&self) -> Result<Vec<PathBuf>> {
         let path = self.blocks_dir.join("blk*.dat");
         debug!("listing block files at {:?}", path);
-        let mut paths: Vec<PathBuf> = glob::glob(path.to_str().unwrap())
+        let mut paths: Vec<_> = glob::glob(path.to_str().anyhow_as("Invalid path")?)
             .chain_err(|| "failed to list blk*.dat files")?
-            .map(|res| res.unwrap())
-            .collect();
+            .try_collect().track_err()?;
         paths.sort();
         Ok(paths)
     }
@@ -376,7 +376,7 @@ impl Daemon {
     }
 
     fn call_jsonrpc(&self, method: &str, request: &Value) -> Result<Value> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock();
         let timer = self.latency.with_label_values(&[method]).start_timer();
         let request = request.to_string();
         conn.send(&request)?;
@@ -420,7 +420,7 @@ impl Daemon {
                 Err(Error(ErrorKind::Connection(msg), _)) => {
                     warn!("reconnecting to tidecoind: {}", msg);
                     self.signal.wait(Duration::from_secs(3), false)?;
-                    let mut conn = self.conn.lock().unwrap();
+                    let mut conn = self.conn.lock();
                     *conn = conn.reconnect()?;
                     continue;
                 }
@@ -594,9 +594,9 @@ impl Daemon {
         let info: Value = self.request("getblockheader", json!([tip.to_hex()]))?;
         let tip_height = info
             .get("height")
-            .expect("missing height")
+            .chain_err(|| "missing heigh")?
             .as_u64()
-            .expect("non-numeric height") as usize;
+            .chain_err(|| "non-numeric height")? as usize;
         let all_heights: Vec<usize> = (0..=tip_height).collect();
         let chunk_size = 100_000;
         let mut result = vec![];

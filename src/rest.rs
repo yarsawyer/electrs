@@ -2,6 +2,7 @@ use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, T
 use crate::config::{Config, VERSION_STRING};
 use crate::errors;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
+use crate::util::errors::UnwrapPrint;
 use crate::util::{
     create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
     has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
@@ -530,6 +531,7 @@ fn handle_request(
             let blockhm = query
                 .chain()
                 .get_block_with_meta(&hash)
+                .map_err(|e| { Err::<(),_>(e).catch("Block not found"); HttpError::not_found("Block not found".to_string()) })?
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
             let block_value = BlockValue::new(blockhm);
             json_response(block_value, TTL_LONG)
@@ -545,6 +547,7 @@ fn handle_request(
             let txids = query
                 .chain()
                 .get_block_txids(&hash)
+                .map_err(|e| { Err::<(),_>(e).catch("Block not found"); HttpError::not_found("Block not found".to_string()) })?
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
             json_response(txids, TTL_LONG)
         }
@@ -591,6 +594,7 @@ fn handle_request(
             let txids = query
                 .chain()
                 .get_block_txids(&hash)
+                .map_err(|e| { Err::<(),_>(e).catch("Block not found"); HttpError::not_found("Block not found".to_string()) })?
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
             if index >= txids.len() {
                 bail!(HttpError::not_found("tx index out of range".to_string()));
@@ -602,6 +606,7 @@ fn handle_request(
             let txids = query
                 .chain()
                 .get_block_txids(&hash)
+                .map_err(|e| { Err::<(),_>(e).catch("Block not found"); HttpError::not_found("Block not found".to_string()) })?
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
 
             let start_index = start_index
@@ -698,13 +703,22 @@ fn handle_request(
                 }
             }
 
-            txs.extend(
-                query
-                    .mempool()
-                    .history(&script_hash[..], after_txid.as_ref(), max_txs)
-                    .into_iter()
-                    .map(|tx| (tx, None)),
-            );
+            match query.mempool().history(&script_hash[..], after_txid.as_ref(), max_txs) {
+                Ok(mempool_txs) => {
+                    txs.extend(
+                        mempool_txs
+                            .into_iter()
+                            .map(|tx| (tx, None)),
+                    );
+                }
+                Err(e) => {
+                    return Err(HttpError(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("{e:?}"),
+                    ));
+                }
+            }
+
 
             if txs.len() < max_txs {
                 let after_txid_ref = if !txs.is_empty() {
@@ -714,13 +728,22 @@ fn handle_request(
                 } else {
                     after_txid.as_ref()
                 };
-                txs.extend(
-                    query
-                        .chain()
-                        .history(&script_hash[..], after_txid_ref, max_txs - txs.len())
-                        .into_iter()
-                        .map(|(tx, blockid)| (tx, Some(blockid))),
-                );
+
+                match query.chain().history(&script_hash[..], after_txid_ref, max_txs - txs.len()) {
+                    Ok(mempool_txs) => {
+                        txs.extend(
+                            mempool_txs
+                                .into_iter()
+                                .map(|(tx, blockid)| (tx, Some(blockid))),
+                        );
+                    }
+                    Err(e) => {
+                        return Err(HttpError(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("{e:?}"),
+                        ));
+                    }
+                }
             }
 
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
@@ -749,12 +772,20 @@ fn handle_request(
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_default_chain_txs_per_page);
 
-            let txs = query
-                .chain()
-                .history(&script_hash[..], last_seen_txid.as_ref(), max_txs)
-                .into_iter()
-                .map(|(tx, blockid)| (tx, Some(blockid)))
-                .collect();
+            let txs = match query.chain().history(&script_hash[..], last_seen_txid.as_ref(), max_txs) {
+                Ok(txs) => {
+                    txs.into_iter()
+                        .map(|(tx, blockid)| (tx, Some(blockid)))
+                        .collect()
+                }
+                Err(e) => {
+                    return Err(HttpError(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("{e:?}"),
+                    ));
+                }
+            };
+
 
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
         }
@@ -780,12 +811,20 @@ fn handle_request(
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_default_max_mempool_txs);
 
-            let txs = query
-                .mempool()
-                .history(&script_hash[..], None, max_txs)
-                .into_iter()
-                .map(|tx| (tx, None))
-                .collect();
+            let txs = match query.mempool().history(&script_hash[..], None, max_txs) {
+                Ok(txs) => {
+                    txs
+                        .into_iter()
+                        .map(|tx| (tx, None))
+                        .collect()
+                }
+                Err(e) => {
+                    return Err(HttpError(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("{e:?}"),
+                    ));
+                }
+            };
 
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
         }
@@ -1111,6 +1150,7 @@ fn blocks(
         let blockhm = query
             .chain()
             .get_block_with_meta(&current_hash)
+            .map_err(|e| { Err::<(),_>(e).catch("Block not found"); HttpError::not_found("Block not found".to_string()) })?
             .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
         current_hash = blockhm.header_entry.header().prev_blockhash;
 

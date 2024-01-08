@@ -2,6 +2,7 @@ mod block;
 mod script;
 mod transaction;
 
+pub mod errors;
 pub mod bincode_util;
 pub mod electrum_merkle;
 pub mod fees;
@@ -17,7 +18,6 @@ pub use self::transaction::{
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Mutex;
 use std::thread::{self, ThreadId};
 
 use crate::chain::BlockHeader;
@@ -104,16 +104,17 @@ where
     F: FnOnce(&mut HashMap<ThreadId, String>),
 {
     lazy_static! {
-        static ref SPAWNED_THREADS: Mutex<HashMap<ThreadId, String>> = Mutex::new(HashMap::new());
+        static ref SPAWNED_THREADS: parking_lot::Mutex<HashMap<ThreadId, String>> = parking_lot::Mutex::new(HashMap::new());
     }
-    let mut lock = match SPAWNED_THREADS.lock() {
-        Ok(threads) => threads,
-        // There's no possible broken state
-        Err(threads) => {
-            warn!("SPAWNED_THREADS is in a poisoned state! Be wary of incorrect logs!");
-            threads.into_inner()
-        }
-    };
+    let mut lock = SPAWNED_THREADS.lock();
+    // match SPAWNED_THREADS.lock() {
+    //     Ok(threads) => threads,
+    //     // There's no possible broken state
+    //     Err(threads) => {
+    //         warn!("SPAWNED_THREADS is in a poisoned state! Be wary of incorrect logs!");
+    //         threads.into_inner()
+    //     }
+    // };
     f(&mut lock)
 }
 

@@ -6,7 +6,7 @@ extern crate electrs;
 
 use error_chain::ChainedError;
 use std::process;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use electrs::{
@@ -69,16 +69,16 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &metrics,
     ));
 
-    let mempool = Arc::new(RwLock::new(Mempool::new(
+    let mempool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         Arc::clone(&chain),
         &metrics,
         Arc::clone(&config),
     )));
-    mempool.write().unwrap().update(&daemon)?;
+    mempool.write().update(&daemon)?;
 
     #[cfg(feature = "liquid")]
     let asset_db = config.asset_db_path.as_ref().map(|db_dir| {
-        let asset_db = Arc::new(RwLock::new(AssetRegistry::new(db_dir.clone())));
+        let asset_db = Arc::new(parking_lot::RwLock::new(AssetRegistry::new(db_dir.clone())));
         AssetRegistry::spawn_sync(asset_db.clone());
         asset_db
     });
@@ -98,7 +98,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
 
     if let Some(ref precache_file) = config.precache_scripts {
         let precache_scripthashes = precache::scripthashes_from_file(precache_file.to_string())
-            .expect("cannot load scripts to precache");
+            .chain_err(|| "cannot load scripts to precache")?;
         precache::precache(
             Arc::clone(&chain),
             precache_scripthashes,
@@ -136,7 +136,9 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         };
 
         // Update mempool
-        mempool.write().unwrap().update(&daemon)?;
+        mempool
+            .write()
+            .update(&daemon)?;
 
         // Update subscribed clients
         electrum_server.notify();
