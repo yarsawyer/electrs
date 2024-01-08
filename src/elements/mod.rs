@@ -1,14 +1,16 @@
-use tidecoin::hashes::{hex::ToHex, Hash};
+use bitcoin::hashes::{hex::ToHex, Hash};
 use elements::secp256k1_zkp::ZERO_TWEAK;
 use elements::{confidential::Value, encode::serialize, issuance::ContractHash, AssetId, TxIn};
 
 pub mod asset;
 pub mod peg;
 mod registry;
+pub mod inscription_entries;
 
 use asset::get_issuance_entropy;
 pub use asset::{lookup_asset, LiquidAsset};
 pub use registry::{AssetRegistry, AssetSorting};
+pub use inscription::*;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct IssuanceValue {

@@ -1,17 +1,16 @@
-use tidecoin::hashes::sha256d::Hash as Sha256dHash;
-use tidecoin::util::merkleblock::MerkleBlock;
-use tidecoin::VarInt;
+use bitcoin::hashes::sha256d::Hash as Sha256dHash;
+use bitcoin::util::merkleblock::MerkleBlock;
+use bitcoin::VarInt;
 use itertools::Itertools;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-use tidecoin::consensus::encode::{deserialize, serialize};
-
+use bitcoin::consensus::encode::{deserialize, serialize};
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::chain::{
     BlockHash, BlockHeader, Network, OutPoint, Script, Transaction, TxOut, Txid, Value,
@@ -19,7 +18,13 @@ use crate::chain::{
 use crate::config::Config;
 use crate::daemon::Daemon;
 use crate::errors::*;
+use crate::inscription_entries::index::{
+    ID_TO_ENTRY, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS, INSCRIPTION_TXID_TO_TX,
+    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SATPOINT_TO_INSCRIPTION_ID,
+    SAT_TO_INSCRIPTION_ID,
+};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
+use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
     BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
@@ -28,6 +33,7 @@ use crate::util::{
 use crate::new_index::db::{DBFlush, DBRow, ReverseScanIterator, ScanIterator, DB};
 use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
 
+use super::inscriptions_updater::InscriptionUpdater;
 
 const MIN_HISTORY_ITEMS_TO_CACHE: usize = 100;
 
@@ -36,9 +42,11 @@ pub struct Store {
     txstore_db: DB,
     history_db: DB,
     cache_db: DB,
-    added_blockhashes: RwLock<HashSet<BlockHash>>,
-    indexed_blockhashes: RwLock<HashSet<BlockHash>>,
-    indexed_headers: RwLock<HeaderList>,
+    inscription_db: DB,
+    added_blockhashes: parking_lot::RwLock<HashSet<BlockHash>>,
+    indexed_blockhashes: parking_lot::RwLock<HashSet<BlockHash>>,
+    indexed_headers: parking_lot::RwLock<HeaderList>,
+    outpoint_cache: parking_lot::RwLock<HashMap<OutPoint, u64>>,
 }
 
 impl Store {
@@ -52,6 +60,8 @@ impl Store {
         debug!("{} blocks were indexed", indexed_blockhashes.len());
 
         let cache_db = DB::open(&path.join("cache"), config);
+
+        let inscription_db = DB::open(&path.join("inscription"), config);
 
         let headers = if let Some(tip_hash) = txstore_db.get(b"t") {
             let tip_hash = deserialize(&tip_hash).expect("invalid chain tip in `t`");
@@ -70,9 +80,11 @@ impl Store {
             txstore_db,
             history_db,
             cache_db,
-            added_blockhashes: RwLock::new(added_blockhashes),
-            indexed_blockhashes: RwLock::new(indexed_blockhashes),
-            indexed_headers: RwLock::new(headers),
+            inscription_db,
+            added_blockhashes: parking_lot::RwLock::new(added_blockhashes),
+            indexed_blockhashes: parking_lot::RwLock::new(indexed_blockhashes),
+            indexed_headers: parking_lot::RwLock::new(headers),
+            outpoint_cache: parking_lot::RwLock::new(HashMap::<OutPoint, u64>::new()),
         }
     }
 
@@ -200,7 +212,7 @@ impl Indexer {
     }
 
     fn headers_to_add(&self, new_headers: &[HeaderEntry]) -> Vec<HeaderEntry> {
-        let added_blockhashes = self.store.added_blockhashes.read().unwrap();
+        let added_blockhashes = self.store.added_blockhashes.read();
         new_headers
             .iter()
             .filter(|e| !added_blockhashes.contains(e.hash()))
@@ -209,7 +221,7 @@ impl Indexer {
     }
 
     fn headers_to_index(&self, new_headers: &[HeaderEntry]) -> Vec<HeaderEntry> {
-        let indexed_blockhashes = self.store.indexed_blockhashes.read().unwrap();
+        let indexed_blockhashes = self.store.indexed_blockhashes.read();
         new_headers
             .iter()
             .filter(|e| !indexed_blockhashes.contains(e.hash()))
@@ -228,7 +240,7 @@ impl Indexer {
     }
 
     fn get_new_headers(&self, daemon: &Daemon, tip: &BlockHash) -> Result<Vec<HeaderEntry>> {
-        let headers = self.store.indexed_headers.read().unwrap();
+        let headers = self.store.indexed_headers.read();
         let new_headers = daemon.get_new_headers(&headers, tip)?;
         let result = headers.order(new_headers);
 
@@ -238,7 +250,7 @@ impl Indexer {
         Ok(result)
     }
 
-    pub fn update(&mut self, daemon: &Daemon) -> Result<BlockHash> {
+    pub fn update(&mut self, daemon: &Daemon, store: Arc<Store>) -> Result<BlockHash> {
         let daemon = daemon.reconnect()?;
         let tip = daemon.getbestblockhash()?;
         let new_headers = self.get_new_headers(&daemon, &tip)?;
@@ -249,7 +261,7 @@ impl Indexer {
             to_add.len(),
             self.from
         );
-        start_fetcher(self.from, &daemon, to_add)?.map(|blocks| self.add(&blocks));
+        start_fetcher(self.from, &daemon, to_add)?.map(|blocks| self.add(&blocks, store.clone()));
         self.start_auto_compactions(&self.store.txstore_db);
 
         let to_index = self.headers_to_index(&new_headers);
@@ -272,7 +284,7 @@ impl Indexer {
         debug!("updating synced tip to {:?}", tip);
         self.store.txstore_db.put_sync(b"t", &serialize(&tip));
 
-        let mut headers = self.store.indexed_headers.write().unwrap();
+        let mut headers = self.store.indexed_headers.write();
         headers.apply(new_headers);
         assert_eq!(tip, *headers.tip());
 
@@ -285,12 +297,12 @@ impl Indexer {
         Ok(tip)
     }
 
-    fn add(&self, blocks: &[BlockEntry]) {
+    fn add(&self, blocks: &[BlockEntry], store: Arc<Store>) {
         debug!("Adding {} blocks to Indexer", blocks.len());
         // TODO: skip orphaned blocks?
         let rows = {
             let _timer = self.start_timer("add_process");
-            add_blocks(blocks, &self.iconfig)
+            add_blocks(blocks, &self.iconfig, store)
         };
         {
             let _timer = self.start_timer("add_write");
@@ -300,7 +312,6 @@ impl Indexer {
         self.store
             .added_blockhashes
             .write()
-            .unwrap()
             .extend(blocks.iter().map(|b| b.entry.hash()));
     }
 
@@ -312,7 +323,7 @@ impl Indexer {
         };
         let rows = {
             let _timer = self.start_timer("index_process");
-            let added_blockhashes = self.store.added_blockhashes.read().unwrap();
+            let added_blockhashes = self.store.added_blockhashes.read();
             for b in blocks {
                 let blockhash = b.entry.hash();
                 // TODO: replace by lookup into txstore_db?
@@ -352,20 +363,24 @@ impl ChainQuery {
         self.duration.with_label_values(&[name]).start_timer()
     }
 
-    pub fn get_block_txids(&self, hash: &BlockHash) -> Option<Vec<Txid>> {
+    pub fn get_block_txids(&self, hash: &BlockHash) -> Result<Option<Vec<Txid>>> {
         let _timer = self.start_timer("get_block_txids");
 
         if self.light_mode {
             // TODO fetch block as binary from REST API instead of as hex
-            let mut blockinfo = self.daemon.getblock_raw(hash, 1).ok()?;
-            Some(serde_json::from_value(blockinfo["tx"].take()).unwrap())
+            let mut blockinfo = self.daemon.getblock_raw(hash, 1)?;
+            Ok(Some(
+                serde_json::from_value(blockinfo["tx"].take()).track_err()?,
+            ))
         } else {
-            self.store
+            let Some(v) = self
+                .store
                 .txstore_db
                 .get(&BlockRow::txids_key(full_hash(&hash[..])))
-                .map(|val| {
-                    bincode_util::deserialize_little(&val).expect("failed to parse block txids")
-                })
+            else {
+                return Ok(None);
+            };
+            Ok(Some(bincode_util::deserialize_little(&v).track_err()?))
         }
     }
 
@@ -399,19 +414,24 @@ impl ChainQuery {
         })
     }
 
-    pub fn get_block_meta(&self, hash: &BlockHash) -> Option<BlockMeta> {
+    pub fn get_block_meta(&self, hash: &BlockHash) -> Result<Option<BlockMeta>> {
         let _timer = self.start_timer("get_block_meta");
 
         if self.light_mode {
-            let blockinfo = self.daemon.getblock_raw(hash, 1).ok()?;
-            Some(serde_json::from_value(blockinfo).unwrap())
+            let blockinfo = self.daemon.getblock_raw(hash, 1).track_err()?;
+            Ok(serde_json::from_value(blockinfo).track_err()?)
         } else {
-            self.store
+            let Some(v) = self
+                .store
                 .txstore_db
                 .get(&BlockRow::meta_key(full_hash(&hash[..])))
-                .map(|val| {
-                    bincode_util::deserialize_little(&val).expect("failed to parse BlockMeta")
-                })
+            else {
+                return Ok(None);
+            };
+            Ok(Some(
+                bincode_util::deserialize_little::<BlockMeta>(&v)
+                    .anyhow_as("failed to parse BlockMeta")?,
+            ))
         }
     }
 
@@ -419,12 +439,12 @@ impl ChainQuery {
         let _timer = self.start_timer("get_block_raw");
 
         if self.light_mode {
-            let blockhex = self.daemon.getblock_raw(hash, 0).ok()?;
+            let blockhex = self.daemon.getblock_raw(hash, 0).catch("")?;
             Some(hex::decode(blockhex.as_str().unwrap()).unwrap())
         } else {
             let entry = self.header_by_hash(hash)?;
-            let meta = self.get_block_meta(hash)?;
-            let txids = self.get_block_txids(hash)?;
+            let meta = self.get_block_meta(hash).catch("")??;
+            let txids = self.get_block_txids(hash).catch("")??;
 
             // Reconstruct the raw block using the header and txids,
             // as <raw header><tx count varint><raw txs>
@@ -450,17 +470,19 @@ impl ChainQuery {
 
     pub fn get_mtp(&self, height: usize) -> u32 {
         let _timer = self.start_timer("get_block_mtp");
-        self.store.indexed_headers.read().unwrap().get_mtp(height)
+        self.store.indexed_headers.read().get_mtp(height)
     }
 
-    pub fn get_block_with_meta(&self, hash: &BlockHash) -> Option<BlockHeaderMeta> {
+    pub fn get_block_with_meta(&self, hash: &BlockHash) -> Result<Option<BlockHeaderMeta>> {
         let _timer = self.start_timer("get_block_with_meta");
-        let header_entry = self.header_by_hash(hash)?;
-        Some(BlockHeaderMeta {
-            meta: self.get_block_meta(hash)?,
+        let Some(header_entry) = self.header_by_hash(hash) else {
+            return Ok(None);
+        };
+        Ok(Some(BlockHeaderMeta {
+            meta: self.get_block_meta(hash)?.track_err()?,
             mtp: self.get_mtp(header_entry.height()),
             header_entry,
-        })
+        }))
     }
 
     pub fn history_iter_scan(&self, code: u8, hash: &[u8], start_height: usize) -> ScanIterator {
@@ -481,7 +503,7 @@ impl ChainQuery {
         scripthash: &[u8],
         last_seen_txid: Option<&Txid>,
         limit: usize,
-    ) -> Vec<(Transaction, BlockId)> {
+    ) -> Result<Vec<(Transaction, BlockId)>> {
         // scripthash lookup
         self._history(b'H', scripthash, last_seen_txid, limit)
     }
@@ -498,7 +520,7 @@ impl ChainQuery {
         hash: &[u8],
         last_seen_txid: Option<&Txid>,
         limit: usize,
-    ) -> Vec<(Transaction, BlockId)> {
+    ) -> Result<Vec<(Transaction, BlockId)>> {
         let _timer_scan = self.start_timer("history");
         let txs_conf = self
             .history_iter_scan_reverse(code, hash)
@@ -518,12 +540,13 @@ impl ChainQuery {
             .take(limit)
             .collect::<Vec<(Txid, BlockId)>>();
 
-        self.lookup_txns(&txs_conf)
-            .expect("failed looking up txs in history index")
+        Ok(self
+            .lookup_txns(&txs_conf)
+            .map_err(|e| format!("failed looking up txs in history index: {e:?}"))?
             .into_iter()
             .zip(txs_conf)
             .map(|(tx, (_, blockid))| (tx, blockid))
-            .collect()
+            .collect())
     }
 
     pub fn history_txids(&self, scripthash: &[u8], limit: usize) -> Vec<(Txid, BlockId)> {
@@ -767,7 +790,6 @@ impl ChainQuery {
         self.store
             .indexed_headers
             .read()
-            .unwrap()
             .header_by_blockhash(hash)
             .cloned()
     }
@@ -777,7 +799,6 @@ impl ChainQuery {
         self.store
             .indexed_headers
             .read()
-            .unwrap()
             .header_by_blockhash(hash)
             .map(|header| header.height())
     }
@@ -786,7 +807,6 @@ impl ChainQuery {
         self.store
             .indexed_headers
             .read()
-            .unwrap()
             .header_by_height(height)
             .cloned()
     }
@@ -795,7 +815,6 @@ impl ChainQuery {
         self.store
             .indexed_headers
             .read()
-            .unwrap()
             .header_by_height(height)
             .map(|entry| *entry.hash())
     }
@@ -804,7 +823,6 @@ impl ChainQuery {
         self.store
             .indexed_headers
             .read()
-            .unwrap()
             .header_by_height(height)
             .map(BlockId::from)
     }
@@ -814,21 +832,20 @@ impl ChainQuery {
         self.store
             .indexed_headers
             .read()
-            .unwrap()
             .header_by_blockhash(hash)
             .map(BlockId::from)
     }
 
     pub fn best_height(&self) -> usize {
-        self.store.indexed_headers.read().unwrap().len() - 1
+        self.store.indexed_headers.read().len() - 1
     }
 
     pub fn best_hash(&self) -> BlockHash {
-        *self.store.indexed_headers.read().unwrap().tip()
+        *self.store.indexed_headers.read().tip()
     }
 
     pub fn best_header(&self) -> HeaderEntry {
-        let headers = self.store.indexed_headers.read().unwrap();
+        let headers = self.store.indexed_headers.read();
         headers
             .header_by_blockhash(headers.tip())
             .expect("missing chain tip")
@@ -907,7 +924,7 @@ impl ChainQuery {
     }
     pub fn tx_confirming_block(&self, txid: &Txid) -> Option<BlockId> {
         let _timer = self.start_timer("tx_confirming_block");
-        let headers = self.store.indexed_headers.read().unwrap();
+        let headers = self.store.indexed_headers.read();
         self.store
             .txstore_db
             .iter_scan(&TxConfRow::filter(&txid[..]))
@@ -925,7 +942,7 @@ impl ChainQuery {
         // TODO differentiate orphaned and non-existing blocks? telling them apart requires
         // an additional db read.
 
-        let headers = self.store.indexed_headers.read().unwrap();
+        let headers = self.store.indexed_headers.read();
 
         // header_by_blockhash only returns blocks that are part of the best chain,
         // or None for orphaned blocks.
@@ -946,7 +963,7 @@ impl ChainQuery {
         let _timer = self.start_timer("get_merkleblock_proof");
         let blockid = self.tx_confirming_block(txid)?;
         let headerentry = self.header_by_hash(&blockid.hash)?;
-        let block_txids = self.get_block_txids(&blockid.hash)?;
+        let block_txids = self.get_block_txids(&blockid.hash).catch("")??;
 
         Some(MerkleBlock::from_header_txids_with_predicate(
             headerentry.header(),
@@ -989,7 +1006,11 @@ fn load_blockheaders(db: &DB) -> HashMap<BlockHash, BlockHeader> {
         .collect()
 }
 
-fn add_blocks(block_entries: &[BlockEntry], iconfig: &IndexerConfig) -> Vec<DBRow> {
+fn add_blocks(
+    block_entries: &[BlockEntry],
+    iconfig: &IndexerConfig,
+    store: Arc<Store>,
+) -> Vec<DBRow> {
     // persist individual transactions:
     //      T{txid} → {rawtx}
     //      C{txid}{blockhash}{height} →
@@ -998,13 +1019,36 @@ fn add_blocks(block_entries: &[BlockEntry], iconfig: &IndexerConfig) -> Vec<DBRo
     //      B{blockhash} → {header}
     //      X{blockhash} → {txid1}...{txidN}
     //      M{blockhash} → {tx_count}{size}{weight}
+
     block_entries
         .par_iter() // serialization is CPU-intensive
         .map(|b| {
             let mut rows = vec![];
             let blockhash = full_hash(&b.entry.hash()[..]);
             let txids: Vec<Txid> = b.block.txdata.iter().map(|tx| tx.txid()).collect();
+
+            let mut inscription_updater = InscriptionUpdater::new(
+                22490,
+                INSCRIPTION_ID_TO_SATPOINT,
+                INSCRIPTION_ID_TO_TXIDS,
+                INSCRIPTION_TXID_TO_TX,
+                PARTIAL_TXID_TO_TXIDS,
+                ID_TO_ENTRY,
+                0,
+                NUMBER_TO_ID,
+                OUTPOINT_TO_VALUE,
+                SAT_TO_INSCRIPTION_ID,
+                SATPOINT_TO_INSCRIPTION_ID,
+                0,
+                &store.outpoint_cache,
+                &store.inscription_db,
+            )
+            .unwrap();
+
             for tx in &b.block.txdata {
+                inscription_updater
+                    .index_transaction_inscriptions(tx, tx.txid(), None)
+                    .unwrap();
                 add_transaction(tx, blockhash, &mut rows, iconfig);
             }
 

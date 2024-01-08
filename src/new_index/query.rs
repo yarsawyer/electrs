@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::chain::{Network, OutPoint, Transaction, TxOut, Txid};
@@ -21,17 +21,17 @@ const CONF_TARGETS: [u16; 28] = [
 
 pub struct Query {
     chain: Arc<ChainQuery>, // TODO: should be used as read-only
-    mempool: Arc<RwLock<Mempool>>,
+    mempool: Arc<parking_lot::RwLock<Mempool>>,
     daemon: Arc<Daemon>,
     config: Arc<Config>,
-    cached_estimates: RwLock<(HashMap<u16, f64>, Option<Instant>)>,
-    cached_relayfee: RwLock<Option<f64>>,
+    cached_estimates: parking_lot::RwLock<(HashMap<u16, f64>, Option<Instant>)>,
+    cached_relayfee: parking_lot::RwLock<Option<f64>>,
 }
 
 impl Query {
     pub fn new(
         chain: Arc<ChainQuery>,
-        mempool: Arc<RwLock<Mempool>>,
+        mempool: Arc<parking_lot::RwLock<Mempool>>,
         daemon: Arc<Daemon>,
         config: Arc<Config>,
     ) -> Self {
@@ -40,8 +40,8 @@ impl Query {
             mempool,
             daemon,
             config,
-            cached_estimates: RwLock::new((HashMap::new(), None)),
-            cached_relayfee: RwLock::new(None),
+            cached_estimates: parking_lot::RwLock::new((HashMap::new(), None)),
+            cached_relayfee: parking_lot::RwLock::new(None),
         }
     }
 
@@ -57,8 +57,8 @@ impl Query {
         self.config.network_type
     }
 
-    pub fn mempool(&self) -> RwLockReadGuard<Mempool> {
-        self.mempool.read().unwrap()
+    pub fn mempool(&self) -> parking_lot::RwLockReadGuard<Mempool> {
+        self.mempool.read()
     }
 
     pub fn broadcast_raw(&self, txhex: &str) -> Result<Txid> {
@@ -67,9 +67,8 @@ impl Query {
         // Ignore errors in adding to the cache and show an internal warning.
         if let Err(e) = self
             .mempool
-            .write()
-            .unwrap()
-            .add_by_txid(&self.daemon, &txid)
+                .write()
+                .add_by_txid(&self.daemon, &txid)
         {
             warn!(
                 "broadcast_raw of {txid} succeeded to broadcast \
@@ -87,7 +86,7 @@ impl Query {
         )?;
         let mempool = self.mempool();
         utxos.retain(|utxo| !mempool.has_spend(&OutPoint::from(utxo)));
-        utxos.extend(mempool.utxo(scripthash));
+        utxos.extend(mempool.utxo(scripthash)?);
         Ok(utxos)
     }
 
@@ -167,7 +166,7 @@ impl Query {
     }
 
     pub fn estimate_fee(&self, conf_target: u16) -> Option<f64> {
-        if let (ref cache, Some(cache_time)) = *self.cached_estimates.read().unwrap() {
+        if let (ref cache, Some(cache_time)) = *self.cached_estimates.read() {
             if cache_time.elapsed() < Duration::from_secs(FEE_ESTIMATES_TTL) {
                 return cache.get(&conf_target).copied();
             }
@@ -176,27 +175,26 @@ impl Query {
         self.update_fee_estimates();
         self.cached_estimates
             .read()
-            .unwrap()
             .0
             .get(&conf_target)
             .copied()
     }
 
     pub fn estimate_fee_map(&self) -> HashMap<u16, f64> {
-        if let (ref cache, Some(cache_time)) = *self.cached_estimates.read().unwrap() {
+        if let (ref cache, Some(cache_time)) = *self.cached_estimates.read() {
             if cache_time.elapsed() < Duration::from_secs(FEE_ESTIMATES_TTL) {
                 return cache.clone();
             }
         }
 
         self.update_fee_estimates();
-        self.cached_estimates.read().unwrap().0.clone()
+        self.cached_estimates.read().0.clone()
     }
 
     fn update_fee_estimates(&self) {
         match self.daemon.estimatesmartfee_batch(&CONF_TARGETS) {
             Ok(estimates) => {
-                *self.cached_estimates.write().unwrap() = (estimates, Some(Instant::now()));
+                *self.cached_estimates.write() = (estimates, Some(Instant::now()));
             }
             Err(err) => {
                 warn!("failed estimating feerates: {:?}", err);
@@ -205,12 +203,12 @@ impl Query {
     }
 
     pub fn get_relayfee(&self) -> Result<f64> {
-        if let Some(cached) = *self.cached_relayfee.read().unwrap() {
+        if let Some(cached) = *self.cached_relayfee.read() {
             return Ok(cached);
         }
 
         let relayfee = self.daemon.get_relayfee()?;
-        self.cached_relayfee.write().unwrap().replace(relayfee);
+        self.cached_relayfee.write().replace(relayfee);
         Ok(relayfee)
     }
 

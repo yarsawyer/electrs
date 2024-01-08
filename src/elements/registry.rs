@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{cmp, fs, path, thread};
 
@@ -101,9 +101,9 @@ impl AssetRegistry {
         Ok(())
     }
 
-    pub fn spawn_sync(asset_db: Arc<RwLock<AssetRegistry>>) -> thread::JoinHandle<()> {
+    pub fn spawn_sync(asset_db: Arc<parking_lot::RwLock<AssetRegistry>>) -> thread::JoinHandle<()> {
         crate::util::spawn_thread("asset-registry", move || loop {
-            if let Err(e) = asset_db.write().unwrap().fs_sync() {
+            if let Err(e) = asset_db.write().fs_sync() {
                 error!("registry fs_sync failed: {:?}", e);
             }
 

@@ -12,15 +12,15 @@ pub trait ScriptToAsm: std::fmt::Debug {
         asm[7..asm.len() - 1].to_string()
     }
 }
-impl ScriptToAsm for tidecoin::Script {}
+impl ScriptToAsm for bitcoin::Script {}
 
 pub trait ScriptToAddr {
     fn to_address_str(&self, network: Network) -> Option<String>;
 }
 
-impl ScriptToAddr for tidecoin::Script {
+impl ScriptToAddr for bitcoin::Script {
     fn to_address_str(&self, network: Network) -> Option<String> {
-        tidecoin::Address::from_script(self, network.into()).map(|s| s.to_string())
+        bitcoin::Address::from_script(self, network.into()).map(|s| s.to_string())
     }
 }
 

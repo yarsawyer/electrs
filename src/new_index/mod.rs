@@ -13,3 +13,4 @@ pub use self::schema::{
     compute_script_hash, parse_hash, ChainQuery, FundingInfo, Indexer, ScriptStats, SpendingInfo,
     SpendingInput, Store, TxHistoryInfo, TxHistoryKey, TxHistoryRow, Utxo,
 };
+mod inscriptions_updater;

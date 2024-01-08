@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::sync::Arc;
 
 use bitcoin::hashes::{hex::FromHex, sha256, Hash};
 use elements::confidential::{Asset, Value};
@@ -348,8 +348,8 @@ fn asset_history_row(
 }
 
 pub enum AssetRegistryLock<'a> {
-    RwLock(&'a Arc<RwLock<AssetRegistry>>),
-    RwLockReadGuard(&'a RwLockReadGuard<'a, AssetRegistry>),
+    RwLock(&'a Arc<parking_lot::RwLock<AssetRegistry>>),
+    RwLockReadGuard(&'a parking_lot::RwLockReadGuard<'a, AssetRegistry>),
 }
 
 pub fn lookup_asset(
@@ -387,7 +387,7 @@ pub fn lookup_asset(
 
         let meta = meta.map(Clone::clone).or_else(|| match registry {
             Some(AssetRegistryLock::RwLock(rwlock)) => {
-                rwlock.read().unwrap().get(asset_id).cloned()
+                rwlock.read().get(asset_id).cloned()
             }
             Some(AssetRegistryLock::RwLockReadGuard(guard)) => guard.get(asset_id).cloned(),
             None => None,

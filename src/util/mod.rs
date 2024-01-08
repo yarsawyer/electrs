@@ -2,6 +2,7 @@ mod block;
 mod script;
 mod transaction;
 
+pub mod errors;
 pub mod bincode_util;
 pub mod electrum_merkle;
 pub mod fees;
@@ -17,11 +18,10 @@ pub use self::transaction::{
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Mutex;
 use std::thread::{self, ThreadId};
 
 use crate::chain::BlockHeader;
-use tidecoin::hashes::sha256d::Hash as Sha256dHash;
+use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
 
@@ -104,16 +104,17 @@ where
     F: FnOnce(&mut HashMap<ThreadId, String>),
 {
     lazy_static! {
-        static ref SPAWNED_THREADS: Mutex<HashMap<ThreadId, String>> = Mutex::new(HashMap::new());
+        static ref SPAWNED_THREADS: parking_lot::Mutex<HashMap<ThreadId, String>> = parking_lot::Mutex::new(HashMap::new());
     }
-    let mut lock = match SPAWNED_THREADS.lock() {
-        Ok(threads) => threads,
-        // There's no possible broken state
-        Err(threads) => {
-            warn!("SPAWNED_THREADS is in a poisoned state! Be wary of incorrect logs!");
-            threads.into_inner()
-        }
-    };
+    let mut lock = SPAWNED_THREADS.lock();
+    // match SPAWNED_THREADS.lock() {
+    //     Ok(threads) => threads,
+    //     // There's no possible broken state
+    //     Err(threads) => {
+    //         warn!("SPAWNED_THREADS is in a poisoned state! Be wary of incorrect logs!");
+    //         threads.into_inner()
+    //     }
+    // };
     f(&mut lock)
 }
 
@@ -194,7 +195,7 @@ pub fn create_socket(addr: &SocketAddr) -> Socket {
 ///
 /// Copied from https://github.com/rust-bitcoin/rust-bitcoincore-rpc/blob/master/json/src/lib.rs
 pub mod serde_hex {
-    use tidecoin::hashes::hex::{FromHex, ToHex};
+    use bitcoin::hashes::hex::{FromHex, ToHex};
     use serde::de::Error;
     use serde::{Deserializer, Serializer};
 
@@ -208,7 +209,7 @@ pub mod serde_hex {
     }
 
     pub mod opt {
-        use tidecoin::hashes::hex::{FromHex, ToHex};
+        use bitcoin::hashes::hex::{FromHex, ToHex};
         use serde::de::Error;
         use serde::{Deserializer, Serializer};
 
