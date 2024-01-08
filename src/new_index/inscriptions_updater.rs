@@ -10,12 +10,13 @@ use crate::{
     inscription_entries::{
         entry::{Entry, InscriptionEntry},
         height::Height,
-        index::{InscriptionIndex, NUMBER_TO_ID},
+        index::InscriptionIndex,
         inscription::Inscription,
         inscription::ParsedInscription,
         inscription_id::InscriptionId,
         Sat, SatPoint,
-    }, util::errors::AsAnyhow,
+    },
+    util::errors::AsAnyhow,
 };
 use anyhow::{anyhow, Result};
 use bitcoin::consensus::Decodable;
@@ -73,7 +74,13 @@ impl<'a> InscriptionUpdater<'a> {
     ) -> Result<Self> {
         let next_number = database
             .iter_scan(db_key!(NUMBER_TO_ID, ""))
-            .map(|dbrow| dbrow.value.try_into().map(|x|u64::from_le_bytes(x)+1).unwrap_or(0))
+            .map(|dbrow| {
+                dbrow
+                    .value
+                    .try_into()
+                    .map(|x| u64::from_le_bytes(x) + 1)
+                    .unwrap_or(0)
+            })
             .next()
             .unwrap_or(0);
 
@@ -112,7 +119,8 @@ impl<'a> InscriptionUpdater<'a> {
                 input_value += Height(self.height).subsidy();
             } else {
                 for bibas in
-                    InscriptionIndex::inscriptions_on_output(self.database, tx_in.previous_output).track_err()?
+                    InscriptionIndex::inscriptions_on_output(self.database, tx_in.previous_output)
+                        .track_err()?
                 {
                     let (old_satpoint, inscription_id) = bibas.track_err()?;
 
@@ -123,23 +131,21 @@ impl<'a> InscriptionUpdater<'a> {
                     });
                 }
 
-                input_value += if let Some(value) = self
-                    .value_cache
-                    .write()
-                    .remove(&tx_in.previous_output)
-                {
-                    value
-                } else if let Some(value) = self.database.remove(db_key!(
-                    self.outpoint_to_value,
-                    String::from_utf8(tx_in.previous_output.store().track_err()?.to_vec()).track_err()?
-                )) {
-                    u64::from_le_bytes(value.try_into().track_err()?)
-                } else {
-                    return Err(anyhow!(
-                        "failed to get transaction for {}",
-                        tx_in.previous_output.txid
-                    ));
-                }
+                input_value +=
+                    if let Some(value) = self.value_cache.write().remove(&tx_in.previous_output) {
+                        value
+                    } else if let Some(value) = self.database.remove(db_key!(
+                        self.outpoint_to_value,
+                        String::from_utf8(tx_in.previous_output.store().track_err()?.to_vec())
+                            .track_err()?
+                    )) {
+                        u64::from_le_bytes(value.try_into().track_err()?)
+                    } else {
+                        return Err(anyhow!(
+                            "failed to get transaction for {}",
+                            tx_in.previous_output.txid
+                        ));
+                    }
             }
         }
 
@@ -380,7 +386,8 @@ impl<'a> InscriptionUpdater<'a> {
                             sat,
                             timestamp: self.timestamp,
                         }
-                        .store().track_err()?,
+                        .store()
+                        .track_err()?,
                     ),
                 );
 
