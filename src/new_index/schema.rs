@@ -369,13 +369,18 @@ impl ChainQuery {
         if self.light_mode {
             // TODO fetch block as binary from REST API instead of as hex
             let mut blockinfo = self.daemon.getblock_raw(hash, 1)?;
-            Ok(Some(serde_json::from_value(blockinfo["tx"].take()).track_err()?))
+            Ok(Some(
+                serde_json::from_value(blockinfo["tx"].take()).track_err()?,
+            ))
         } else {
-            let Some(v) = self.store
+            let Some(v) = self
+                .store
                 .txstore_db
                 .get(&BlockRow::txids_key(full_hash(&hash[..])))
-                else { return Ok(None)};
-                Ok(Some(bincode_util::deserialize_little(&v).track_err()?))
+            else {
+                return Ok(None);
+            };
+            Ok(Some(bincode_util::deserialize_little(&v).track_err()?))
         }
     }
 
@@ -416,11 +421,17 @@ impl ChainQuery {
             let blockinfo = self.daemon.getblock_raw(hash, 1).track_err()?;
             Ok(serde_json::from_value(blockinfo).track_err()?)
         } else {
-            let Some(v) = self.store
+            let Some(v) = self
+                .store
                 .txstore_db
                 .get(&BlockRow::meta_key(full_hash(&hash[..])))
-                else { return Ok(None) };
-            Ok(Some(bincode_util::deserialize_little::<BlockMeta>(&v).anyhow_as("failed to parse BlockMeta")?))
+            else {
+                return Ok(None);
+            };
+            Ok(Some(
+                bincode_util::deserialize_little::<BlockMeta>(&v)
+                    .anyhow_as("failed to parse BlockMeta")?,
+            ))
         }
     }
 
@@ -464,7 +475,9 @@ impl ChainQuery {
 
     pub fn get_block_with_meta(&self, hash: &BlockHash) -> Result<Option<BlockHeaderMeta>> {
         let _timer = self.start_timer("get_block_with_meta");
-        let Some(header_entry) = self.header_by_hash(hash) else { return Ok(None)};
+        let Some(header_entry) = self.header_by_hash(hash) else {
+            return Ok(None);
+        };
         Ok(Some(BlockHeaderMeta {
             meta: self.get_block_meta(hash)?.track_err()?,
             mtp: self.get_mtp(header_entry.height()),
@@ -527,14 +540,13 @@ impl ChainQuery {
             .take(limit)
             .collect::<Vec<(Txid, BlockId)>>();
 
-        Ok(
-            self.lookup_txns(&txs_conf)
-                .map_err(|e| format!("failed looking up txs in history index: {e:?}"))?
-                .into_iter()
-                .zip(txs_conf)
-                .map(|(tx, (_, blockid))| (tx, blockid))
-                .collect()
-        )
+        Ok(self
+            .lookup_txns(&txs_conf)
+            .map_err(|e| format!("failed looking up txs in history index: {e:?}"))?
+            .into_iter()
+            .zip(txs_conf)
+            .map(|(tx, (_, blockid))| (tx, blockid))
+            .collect())
     }
 
     pub fn history_txids(&self, scripthash: &[u8], limit: usize) -> Vec<(Txid, BlockId)> {
