@@ -60,7 +60,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &config,
         &metrics,
     );
-    let mut tip = indexer.update(&daemon)?;
+    let mut tip = indexer.update(&daemon, Arc::clone(&store))?;
 
     let chain = Arc::new(ChainQuery::new(
         Arc::clone(&store),
@@ -131,7 +131,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         // Index new blocks
         let current_tip = daemon.getbestblockhash()?;
         if current_tip != tip {
-            indexer.update(&daemon)?;
+            indexer.update(&daemon, Arc::clone(&store))?;
             tip = current_tip;
         };
 

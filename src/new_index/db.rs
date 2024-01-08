@@ -98,7 +98,7 @@ impl DB {
 
     pub fn remove(&self, key: &[u8]) -> Option<Vec<u8>> {
         if let Some(value) = self.get(key) {
-            self.db.delete(key);
+            self.db.delete(key).unwrap();
             Some(value)
         } else {
             None

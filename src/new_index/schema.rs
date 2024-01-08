@@ -18,6 +18,11 @@ use crate::chain::{
 use crate::config::Config;
 use crate::daemon::Daemon;
 use crate::errors::*;
+use crate::inscription_entries::index::{
+    ID_TO_ENTRY, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS, INSCRIPTION_TXID_TO_TX,
+    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SATPOINT_TO_INSCRIPTION_ID,
+    SAT_TO_INSCRIPTION_ID,
+};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
@@ -28,6 +33,8 @@ use crate::util::{
 use crate::new_index::db::{DBFlush, DBRow, ReverseScanIterator, ScanIterator, DB};
 use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
 
+use super::inscriptions_updater::InscriptionUpdater;
+
 const MIN_HISTORY_ITEMS_TO_CACHE: usize = 100;
 
 pub struct Store {
@@ -35,9 +42,11 @@ pub struct Store {
     txstore_db: DB,
     history_db: DB,
     cache_db: DB,
+    inscription_db: DB,
     added_blockhashes: parking_lot::RwLock<HashSet<BlockHash>>,
     indexed_blockhashes: parking_lot::RwLock<HashSet<BlockHash>>,
     indexed_headers: parking_lot::RwLock<HeaderList>,
+    outpoint_cache: parking_lot::RwLock<HashMap<OutPoint, u64>>,
 }
 
 impl Store {
@@ -51,6 +60,8 @@ impl Store {
         debug!("{} blocks were indexed", indexed_blockhashes.len());
 
         let cache_db = DB::open(&path.join("cache"), config);
+
+        let inscription_db = DB::open(&path.join("inscription"), config);
 
         let headers = if let Some(tip_hash) = txstore_db.get(b"t") {
             let tip_hash = deserialize(&tip_hash).expect("invalid chain tip in `t`");
@@ -69,9 +80,11 @@ impl Store {
             txstore_db,
             history_db,
             cache_db,
+            inscription_db,
             added_blockhashes: parking_lot::RwLock::new(added_blockhashes),
             indexed_blockhashes: parking_lot::RwLock::new(indexed_blockhashes),
             indexed_headers: parking_lot::RwLock::new(headers),
+            outpoint_cache: parking_lot::RwLock::new(HashMap::<OutPoint, u64>::new()),
         }
     }
 
@@ -237,7 +250,7 @@ impl Indexer {
         Ok(result)
     }
 
-    pub fn update(&mut self, daemon: &Daemon) -> Result<BlockHash> {
+    pub fn update(&mut self, daemon: &Daemon, store: Arc<Store>) -> Result<BlockHash> {
         let daemon = daemon.reconnect()?;
         let tip = daemon.getbestblockhash()?;
         let new_headers = self.get_new_headers(&daemon, &tip)?;
@@ -248,7 +261,7 @@ impl Indexer {
             to_add.len(),
             self.from
         );
-        start_fetcher(self.from, &daemon, to_add)?.map(|blocks| self.add(&blocks));
+        start_fetcher(self.from, &daemon, to_add)?.map(|blocks| self.add(&blocks, store.clone()));
         self.start_auto_compactions(&self.store.txstore_db);
 
         let to_index = self.headers_to_index(&new_headers);
@@ -284,12 +297,12 @@ impl Indexer {
         Ok(tip)
     }
 
-    fn add(&self, blocks: &[BlockEntry]) {
+    fn add(&self, blocks: &[BlockEntry], store: Arc<Store>) {
         debug!("Adding {} blocks to Indexer", blocks.len());
         // TODO: skip orphaned blocks?
         let rows = {
             let _timer = self.start_timer("add_process");
-            add_blocks(blocks, &self.iconfig)
+            add_blocks(blocks, &self.iconfig, store)
         };
         {
             let _timer = self.start_timer("add_write");
@@ -981,7 +994,11 @@ fn load_blockheaders(db: &DB) -> HashMap<BlockHash, BlockHeader> {
         .collect()
 }
 
-fn add_blocks(block_entries: &[BlockEntry], iconfig: &IndexerConfig) -> Vec<DBRow> {
+fn add_blocks(
+    block_entries: &[BlockEntry],
+    iconfig: &IndexerConfig,
+    store: Arc<Store>,
+) -> Vec<DBRow> {
     // persist individual transactions:
     //      T{txid} → {rawtx}
     //      C{txid}{blockhash}{height} →
@@ -990,13 +1007,36 @@ fn add_blocks(block_entries: &[BlockEntry], iconfig: &IndexerConfig) -> Vec<DBRo
     //      B{blockhash} → {header}
     //      X{blockhash} → {txid1}...{txidN}
     //      M{blockhash} → {tx_count}{size}{weight}
+
     block_entries
         .par_iter() // serialization is CPU-intensive
         .map(|b| {
             let mut rows = vec![];
             let blockhash = full_hash(&b.entry.hash()[..]);
             let txids: Vec<Txid> = b.block.txdata.iter().map(|tx| tx.txid()).collect();
+
+            let mut inscription_updater = InscriptionUpdater::new(
+                22490,
+                INSCRIPTION_ID_TO_SATPOINT,
+                INSCRIPTION_ID_TO_TXIDS,
+                INSCRIPTION_TXID_TO_TX,
+                PARTIAL_TXID_TO_TXIDS,
+                ID_TO_ENTRY,
+                0,
+                NUMBER_TO_ID,
+                OUTPOINT_TO_VALUE,
+                SAT_TO_INSCRIPTION_ID,
+                SATPOINT_TO_INSCRIPTION_ID,
+                0,
+                &store.outpoint_cache,
+                &store.inscription_db,
+            )
+            .unwrap();
+
             for tx in &b.block.txdata {
+                inscription_updater
+                    .index_transaction_inscriptions(tx, tx.txid(), None)
+                    .unwrap();
                 add_transaction(tx, blockhash, &mut rows, iconfig);
             }
 

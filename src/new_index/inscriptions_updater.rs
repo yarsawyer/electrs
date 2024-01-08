@@ -2,25 +2,24 @@ use bitcoin::consensus::Encodable;
 use std::{
     collections::{HashMap, VecDeque},
     convert::TryInto,
+    sync::RwLock,
 };
-
-use anyhow::{anyhow, Result};
-use bitcoin::consensus::Decodable;
-use bitcoin::{hashes::Hash, OutPoint, Transaction, Txid};
-use tokio::sync::mpsc::Receiver;
 
 use crate::{
     db_key,
     inscription_entries::{
         entry::{Entry, InscriptionEntry},
         height::Height,
-        index::Index,
+        index::{InscriptionIndex, NUMBER_TO_ID},
         inscription::Inscription,
         inscription::ParsedInscription,
         inscription_id::InscriptionId,
         Sat, SatPoint,
     }, util::errors::AsAnyhow,
 };
+use anyhow::{anyhow, Result};
+use bitcoin::consensus::Decodable;
+use bitcoin::{hashes::Hash, OutPoint, Transaction, Txid};
 
 use super::DB;
 
@@ -42,7 +41,6 @@ pub(crate) struct InscriptionUpdater<'a> {
     id_to_txids: &'a str,
     txid_to_tx: &'a str,
     partial_txid_to_txids: &'a str,
-    value_receiver: &'a mut Receiver<u64>,
     id_to_entry: &'a str,
     lost_sats: u64,
     next_number: u64,
@@ -52,7 +50,7 @@ pub(crate) struct InscriptionUpdater<'a> {
     sat_to_inscription_id: &'a str,
     satpoint_to_id: &'a str,
     timestamp: u32,
-    value_cache: &'a mut HashMap<OutPoint, u64>,
+    value_cache: &'a parking_lot::RwLock<HashMap<OutPoint, u64>>,
     database: &'a DB,
 }
 
@@ -63,7 +61,6 @@ impl<'a> InscriptionUpdater<'a> {
         id_to_txids: &'a str,
         txid_to_tx: &'a str,
         partial_txid_to_txids: &'a str,
-        value_receiver: &'a mut Receiver<u64>,
         id_to_entry: &'a str,
         lost_sats: u64,
         number_to_id: &'a str,
@@ -71,11 +68,11 @@ impl<'a> InscriptionUpdater<'a> {
         sat_to_inscription_id: &'a str,
         satpoint_to_id: &'a str,
         timestamp: u32,
-        value_cache: &'a mut HashMap<OutPoint, u64>,
+        value_cache: &'a parking_lot::RwLock<HashMap<OutPoint, u64>>,
         database: &'a DB,
     ) -> Result<Self> {
         let next_number = database
-            .iter_scan(&[])
+            .iter_scan(db_key!(NUMBER_TO_ID, ""))
             .map(|dbrow| dbrow.value.try_into().map(|x|u64::from_le_bytes(x)+1).unwrap_or(0))
             .next()
             .unwrap_or(0);
@@ -87,7 +84,6 @@ impl<'a> InscriptionUpdater<'a> {
             id_to_txids,
             txid_to_tx,
             partial_txid_to_txids,
-            value_receiver,
             id_to_entry,
             lost_sats,
             next_number,
@@ -116,7 +112,7 @@ impl<'a> InscriptionUpdater<'a> {
                 input_value += Height(self.height).subsidy();
             } else {
                 for bibas in
-                    Index::inscriptions_on_output(self.database, tx_in.previous_output).track_err()?
+                    InscriptionIndex::inscriptions_on_output(self.database, tx_in.previous_output).track_err()?
                 {
                     let (old_satpoint, inscription_id) = bibas.track_err()?;
 
@@ -127,19 +123,22 @@ impl<'a> InscriptionUpdater<'a> {
                     });
                 }
 
-                input_value += if let Some(value) = self.value_cache.remove(&tx_in.previous_output)
+                input_value += if let Some(value) = self
+                    .value_cache
+                    .write()
+                    .remove(&tx_in.previous_output)
                 {
                     value
-                } else if let Some(value) = self.database.remove(self.outpoint_to_value.as_bytes())
-                {
+                } else if let Some(value) = self.database.remove(db_key!(
+                    self.outpoint_to_value,
+                    String::from_utf8(tx_in.previous_output.store().track_err()?.to_vec()).track_err()?
+                )) {
                     u64::from_le_bytes(value.try_into().track_err()?)
                 } else {
-                    self.value_receiver.blocking_recv().ok_or_else(|| {
-                        anyhow!(
-                            "failed to get transaction for {}",
-                            tx_in.previous_output.txid
-                        )
-                    })?
+                    return Err(anyhow!(
+                        "failed to get transaction for {}",
+                        tx_in.previous_output.txid
+                    ));
                 }
             }
         }
@@ -299,7 +298,7 @@ impl<'a> InscriptionUpdater<'a> {
 
             output_value = end;
 
-            self.value_cache.insert(
+            self.value_cache.write().insert(
                 OutPoint {
                     vout: vout.try_into().track_err()?,
                     txid,

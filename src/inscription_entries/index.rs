@@ -15,7 +15,7 @@ use self::entry::{Entry, InscriptionEntry};
 
 const SCHEMA_VERSION: u64 = 3;
 
-pub(crate) struct Index {
+pub(crate) struct InscriptionIndex {
     database: DB,
 }
 
@@ -73,7 +73,7 @@ pub(crate) struct TransactionInfo {
 
 macro_rules! define_prefix {
     ($name:ident, $short_name:ident) => {
-        const $name: &str = stringify!($short_name);
+        pub(crate) const $name: &str = stringify!($short_name);
     };
 }
 
@@ -91,8 +91,12 @@ define_prefix! { INSCRIPTION_ID_TO_TXIDS, IITT }
 define_prefix! { INSCRIPTION_TXID_TO_TX, ITTT }
 define_prefix! { INSCRIPTION_NUMBER_TO_INSCRIPTION_ID, INTI }
 define_prefix! { INSCRIPTION_ID_TO_INSCRIPTION_ENTRY, IITE }
+define_prefix! { PARTIAL_TXID_TO_TXIDS, PTTT }
+define_prefix! { OUTPOINT_TO_VALUE, OTV }
+define_prefix! { ID_TO_ENTRY, ITE }
+define_prefix! { NUMBER_TO_ID, ITE }
 
-impl Index {
+impl InscriptionIndex {
     pub(crate) fn open(options: &Config) -> Result<Self> {
         let database = DB::open(&Path::new("inscriptions"), options);
 
