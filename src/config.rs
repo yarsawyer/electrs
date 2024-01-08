@@ -88,7 +88,7 @@ impl Config {
             .arg(
                 Arg::with_name("daemon_dir")
                     .long("daemon-dir")
-                    .help("Data directory of Bitcoind (default: ~/.bitcoin/)")
+                    .help("Data directory of Bitcoind (default: ~/.bells/)")
                     .takes_value(true),
             )
             .arg(
@@ -100,7 +100,7 @@ impl Config {
             .arg(
                 Arg::with_name("cookie")
                     .long("cookie")
-                    .help("JSONRPC authentication cookie ('USER:PASSWORD', default: read from ~/.bitcoin/.cookie)")
+                    .help("JSONRPC authentication cookie ('USER:PASSWORD', default: read from ~/.bells/.cookie)")
                     .takes_value(true),
             )
             .arg(
@@ -338,7 +338,7 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 let mut default_dir = home_dir().expect("no homedir");
-                default_dir.push(".bitcoin");
+                default_dir.push(".bells");
                 default_dir
             });
         match network_type {
