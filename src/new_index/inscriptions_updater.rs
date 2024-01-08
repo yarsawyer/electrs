@@ -317,8 +317,9 @@ impl<'a> InscriptionUpdater<'a> {
 
             Ok(self.reward - output_value)
         } else {
+            let reward = self.reward;
             self.flotsam.extend(inscriptions.map(|flotsam| Flotsam {
-                offset: self.reward + flotsam.offset,
+                offset: reward + flotsam.offset,
                 ..flotsam
             }));
             self.reward += input_value - output_value;

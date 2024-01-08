@@ -17,20 +17,20 @@ impl Display for SatPoint {
 impl Encodable for SatPoint {
     fn consensus_encode<W: io::Write>(
         &self,
-        writer: W,
+        mut writer: W,
     ) -> std::prelude::v1::Result<usize, io::Error> {
-        let len = self.outpoint.consensus_encode(writer)?;
-        Ok(len + self.offset.consensus_encode(writer)?)
+        let len = self.outpoint.consensus_encode(&mut writer)?;
+        Ok(len + self.offset.consensus_encode(&mut writer)?)
     }
 }
 
 impl Decodable for SatPoint {
     fn consensus_decode<D: io::Read>(
-        d: D,
+        mut d: D,
     ) -> std::prelude::v1::Result<Self, bitcoin::consensus::encode::Error> {
         Ok(SatPoint {
-            outpoint: Decodable::consensus_decode(d)?,
-            offset: Decodable::consensus_decode(d)?,
+            outpoint: Decodable::consensus_decode(&mut d)?,
+            offset: Decodable::consensus_decode(&mut d)?,
         })
     }
 }
