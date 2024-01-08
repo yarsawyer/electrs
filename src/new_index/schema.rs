@@ -618,7 +618,6 @@ impl ChainQuery {
             if utxos.len() > limit {
                 //bail!(ErrorKind::TooPopular)
                 break;
-
             }
         }
 
