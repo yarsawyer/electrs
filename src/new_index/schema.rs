@@ -1038,7 +1038,6 @@ fn add_blocks(
                 NUMBER_TO_ID,
                 OUTPOINT_TO_VALUE,
                 SAT_TO_INSCRIPTION_ID,
-                SATPOINT_TO_INSCRIPTION_ID,
                 0,
                 &store.outpoint_cache,
                 &store.inscription_db,
