@@ -36,7 +36,7 @@ pub(crate) enum Statistic {
 }
 
 impl Statistic {
-    fn key(self) -> u64 {
+    pub fn key(self) -> u64 {
         self.into()
     }
 }
@@ -89,6 +89,7 @@ macro_rules! db_key {
 }
 
 define_prefix! { SAT_TO_INSCRIPTION_ID, STID }
+define_prefix! { SAT_TO_SATPOINT, STS }
 define_prefix! { SATPOINT_TO_INSCRIPTION_ID, SPTID }
 define_prefix! { INSCRIPTION_ID_TO_SATPOINT, IDTS }
 define_prefix! { INSCRIPTION_ID_TO_TXIDS, IITT }
@@ -97,8 +98,11 @@ define_prefix! { INSCRIPTION_NUMBER_TO_INSCRIPTION_ID, INTI }
 define_prefix! { INSCRIPTION_ID_TO_INSCRIPTION_ENTRY, IITE }
 define_prefix! { PARTIAL_TXID_TO_TXIDS, PTTT }
 define_prefix! { OUTPOINT_TO_VALUE, OTV }
+define_prefix! { OUTPOINT_TO_SATRANGES, OTSR }
+define_prefix! { STATISTIC_TO_COUNT, STC }
+define_prefix! { HEIGHT_TO_BLOCK_HASH, STC }
 define_prefix! { ID_TO_ENTRY, ITE }
-define_prefix! { NUMBER_TO_ID, ITE }
+define_prefix! { NUMBER_TO_ID, NTI }
 
 impl InscriptionIndex {
     pub(crate) fn open(options: &Config) -> Result<Self> {

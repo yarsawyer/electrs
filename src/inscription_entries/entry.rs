@@ -123,7 +123,7 @@ impl Entry for SatPoint {
     }
 }
 
-pub(super) type SatRange = (u128, u128);
+pub(crate) type SatRange = (u128, u128);
 
 impl Entry for SatRange {
     type Value = [u8; 24];

@@ -103,6 +103,10 @@ impl Store {
         &self.inscription_db
     }
 
+    pub fn outpoint_cache(&self) -> &parking_lot::RwLock<HashMap<OutPoint, u64>> {
+        &self.outpoint_cache
+    }
+
     pub fn done_initial_sync(&self) -> bool {
         self.txstore_db.get(b"t").is_some()
     }
