@@ -10,7 +10,7 @@ use crate::{
     inscription_entries::{
         entry::{Entry, InscriptionEntry},
         height::Height,
-        index::InscriptionIndex,
+        index::{InscriptionIndex, NUMBER_TO_ID},
         inscription::Inscription,
         inscription::ParsedInscription,
         inscription_id::InscriptionId,
