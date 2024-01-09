@@ -70,7 +70,7 @@ impl<'a> InscriptionUpdater<'a> {
         database: &'a DB,
     ) -> Result<Self> {
         let next_number = database
-            .iter_scan(db_key!(NUMBER_TO_ID, ""))
+            .iter_scan(NUMBER_TO_ID.as_bytes())
             .map(|dbrow| {
                 dbrow
                     .value
@@ -130,10 +130,9 @@ impl<'a> InscriptionUpdater<'a> {
                 input_value +=
                     if let Some(value) = self.value_cache.write().remove(&tx_in.previous_output) {
                         value
-                    } else if let Some(value) = self.database.remove(db_key!(
+                    } else if let Some(value) = self.database.remove(&db_key!(
                         self.outpoint_to_value,
-                        String::from_utf8(tx_in.previous_output.store().track_err()?.to_vec())
-                            .track_err()?
+                        &tx_in.previous_output.store().track_err()?
                     )) {
                         u64::from_le_bytes(value.try_into().track_err()?)
                     } else {
@@ -150,20 +149,17 @@ impl<'a> InscriptionUpdater<'a> {
             let previous_txid_bytes: [u8; 32] = previous_txid.into_inner();
             let mut txids_vec = vec![];
 
-            let txs = match self.database.get(db_key!(
-                self.partial_txid_to_txids,
-                String::from_utf8(previous_txid_bytes.to_vec()).track_err()?
-            )) {
+            let txs = match self
+                .database
+                .get(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes))
+            {
                 Some(partial_txids) => {
                     let txids = partial_txids;
                     let mut txs = vec![];
                     txids_vec = txids.to_vec();
                     for i in 0..txids.len() / 32 {
                         let txid = &txids[i * 32..i * 32 + 32];
-                        let tx_result = self.database.get(db_key!(
-                            self.txid_to_tx,
-                            String::from_utf8(txid.to_vec()).track_err()?
-                        ));
+                        let tx_result = self.database.get(&db_key!(self.txid_to_tx, txid));
                         let tx_result = tx_result.track_err()?;
                         let tx_buf = tx_result;
                         let mut cursor = std::io::Cursor::new(tx_buf);
@@ -187,42 +183,29 @@ impl<'a> InscriptionUpdater<'a> {
                     let mut txid_vec = txid.into_inner().to_vec();
                     txids_vec.append(&mut txid_vec);
 
-                    self.database.remove(db_key!(
-                        self.partial_txid_to_txids,
-                        String::from_utf8(previous_txid_bytes.to_vec()).track_err()?
-                    ));
+                    self.database
+                        .remove(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes));
                     self.database.put(
-                        db_key!(
-                            self.partial_txid_to_txids,
-                            String::from_utf8(txid.into_inner().to_vec()).track_err()?
-                        ),
+                        &db_key!(self.partial_txid_to_txids, &txid.into_inner()),
                         txids_vec.as_slice(),
                     );
 
                     let mut tx_buf = vec![];
                     tx.consensus_encode(&mut tx_buf)?;
                     self.database.put(
-                        db_key!(
-                            self.txid_to_tx,
-                            String::from_utf8(txid.into_inner().to_vec()).track_err()?
-                        ),
+                        &db_key!(self.txid_to_tx, &txid.into_inner()),
                         tx_buf.as_slice(),
                     );
                 }
 
                 ParsedInscription::Complete(_inscription) => {
-                    self.database.remove(db_key!(
-                        self.partial_txid_to_txids,
-                        String::from_utf8(previous_txid_bytes.to_vec()).track_err()?
-                    ));
+                    self.database
+                        .remove(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes));
 
                     let mut tx_buf = vec![];
                     tx.consensus_encode(&mut tx_buf)?;
                     self.database.put(
-                        db_key!(
-                            self.txid_to_tx,
-                            String::from_utf8(txid.into_inner().to_vec()).track_err()?
-                        ),
+                        &db_key!(self.txid_to_tx, &txid.into_inner()),
                         tx_buf.as_slice(),
                     );
 
@@ -238,10 +221,7 @@ impl<'a> InscriptionUpdater<'a> {
                         )
                     }
                     self.database.put(
-                        db_key!(
-                            self.id_to_txids,
-                            String::from_utf8(inscription_id.to_vec()).track_err()?
-                        ),
+                        &db_key!(self.id_to_txids, &inscription_id),
                         txids_vec.as_slice(),
                     );
 
@@ -340,14 +320,14 @@ impl<'a> InscriptionUpdater<'a> {
 
         match flotsam.origin {
             Origin::Old(old_satpoint) => {
-                self.database.remove(db_key!(
+                self.database.remove(&db_key!(
                     self.sat_to_inscription_id,
-                    String::from_utf8(old_satpoint.store().track_err()?.to_vec()).track_err()?
+                    &old_satpoint.store().track_err()?
                 ));
             }
             Origin::New(fee) => {
                 self.database.put(
-                    db_key!(self.number_to_id, self.next_number),
+                    &db_key!(self.number_to_id, &self.next_number.to_be_bytes()),
                     inscription_id.as_slice(),
                 );
 
@@ -359,7 +339,7 @@ impl<'a> InscriptionUpdater<'a> {
                         if offset + size > flotsam.offset as u128 {
                             let n = start + flotsam.offset as u128 - offset;
                             self.database.put(
-                                db_key!(self.sat_to_inscription_id, n),
+                                &db_key!(self.sat_to_inscription_id, &n.to_be_bytes()),
                                 inscription_id.as_slice(),
                             );
                             sat = Some(Sat(n));
@@ -370,10 +350,7 @@ impl<'a> InscriptionUpdater<'a> {
                 }
 
                 self.database.put(
-                    db_key!(
-                        self.id_to_entry,
-                        String::from_utf8(inscription_id.to_vec()).track_err()?
-                    ),
+                    &db_key!(self.id_to_entry, &inscription_id),
                     &tuple_to_bytes(
                         &InscriptionEntry {
                             fee,
@@ -394,17 +371,11 @@ impl<'a> InscriptionUpdater<'a> {
         let new_satpoint = new_satpoint.store().track_err()?;
 
         self.database.put(
-            db_key!(
-                self.sat_to_inscription_id,
-                String::from_utf8(new_satpoint.to_vec()).track_err()?
-            ),
+            &db_key!(self.sat_to_inscription_id, &new_satpoint),
             inscription_id.as_slice(),
         );
         self.database.put(
-            db_key!(
-                self.id_to_satpoint,
-                String::from_utf8(inscription_id.to_vec()).track_err()?
-            ),
+            &db_key!(self.id_to_satpoint, &inscription_id),
             new_satpoint.as_slice(),
         );
 

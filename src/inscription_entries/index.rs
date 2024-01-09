@@ -79,9 +79,13 @@ macro_rules! define_prefix {
 
 #[macro_export]
 macro_rules! db_key {
-    ($prefix:expr, $value:expr) => {
-        format!("{}{}", $prefix, $value).as_bytes()
-    };
+    ($str:expr, $bytes:expr) => {{
+        let str_as_bytes = $str.as_bytes();
+        let mut result = Vec::with_capacity(str_as_bytes.len() + $bytes.len());
+        result.extend_from_slice(str_as_bytes);
+        result.extend_from_slice($bytes);
+        result
+    }};
 }
 
 define_prefix! { SAT_TO_INSCRIPTION_ID, STID }
@@ -104,7 +108,12 @@ impl InscriptionIndex {
     }
 
     pub(crate) fn get_inscription_id_by_sat(&self, sat: Sat) -> Result<Option<InscriptionId>> {
-        let Some(v) = self.database.get(db_key!(SAT_TO_INSCRIPTION_ID, sat.n())) else { return Ok(None) };
+        let Some(v) = self
+            .database
+            .get(&db_key!(SAT_TO_INSCRIPTION_ID, &sat.n().to_be_bytes()))
+        else {
+            return Ok(None);
+        };
         let v = String::from_utf8(v).track_err()?;
         Ok(InscriptionId::from_str(&v).map(Some).track_err()?)
     }
@@ -113,9 +122,12 @@ impl InscriptionIndex {
         &self,
         n: u64,
     ) -> Result<Option<InscriptionId>> {
-        let Some(v) = self.database.get(db_key!(
-            INSCRIPTION_NUMBER_TO_INSCRIPTION_ID,n
-        )) else { return Ok(None) };
+        let Some(v) = self.database.get(&db_key!(
+            INSCRIPTION_NUMBER_TO_INSCRIPTION_ID,
+            &n.to_be_bytes()
+        )) else {
+            return Ok(None);
+        };
 
         let v = String::from_utf8(v).track_err()?;
         Ok(InscriptionId::from_str(&v).map(Some).track_err()?)
@@ -125,13 +137,12 @@ impl InscriptionIndex {
         &self,
         inscription_id: InscriptionId,
     ) -> Result<Option<SatPoint>> {
-        let Some(v) = self.database.get(db_key!(
+        let Some(v) = self.database.get(&db_key!(
             INSCRIPTION_ID_TO_SATPOINT,
-            String::from_utf8(inscription_id.store()
-                .track_err()?
-                .to_vec())
-                .track_err()?
-        )) else { return Ok(None) };
+            &inscription_id.store().track_err()?
+        )) else {
+            return Ok(None);
+        };
 
         let v = String::from_utf8(v).track_err()?;
         Ok(SatPoint::from_str(&v).map(Some).track_err()?)
@@ -143,18 +154,18 @@ impl InscriptionIndex {
     ) -> Result<Option<Inscription>> {
         if self
             .database
-            .get(db_key!(
+            .get(&db_key!(
                 INSCRIPTION_ID_TO_SATPOINT,
-                String::from_utf8(inscription_id.store().track_err()?.to_vec()).track_err()?
+                &inscription_id.store().track_err()?
             ))
             .is_none()
         {
             return Ok(None);
         }
 
-        let txids_result = self.database.get(db_key!(
+        let txids_result = self.database.get(&db_key!(
             INSCRIPTION_ID_TO_TXIDS,
-            String::from_utf8(inscription_id.store().track_err()?.to_vec()).track_err()?
+            &inscription_id.store().track_err()?
         ));
 
         match txids_result {
@@ -163,10 +174,9 @@ impl InscriptionIndex {
 
                 for i in 0..txids.len() / 32 {
                     let txid_buf = &txids[i * 32..i * 32 + 32];
-                    let tx_result = self.database.get(db_key!(
-                        INSCRIPTION_TXID_TO_TX,
-                        String::from_utf8(txid_buf.to_vec()).track_err()?
-                    ));
+                    let tx_result = self
+                        .database
+                        .get(&db_key!(INSCRIPTION_TXID_TO_TX, txid_buf));
 
                     match tx_result {
                         Some(tx_result) => {
@@ -198,18 +208,18 @@ impl InscriptionIndex {
         Self::inscriptions_on_output(&self.database, outpoint)?
             .into_iter()
             .map(|x| x.map(|(_sat_point, inscription_id)| inscription_id))
-            .try_collect().track_err()
+            .try_collect()
+            .track_err()
     }
 
     pub(crate) fn get_inscriptions(
         &self,
         n: Option<usize>,
     ) -> Result<BTreeMap<SatPoint, InscriptionId>> {
-        self
-            .database
+        self.database
             .iter_scan_from(SATPOINT_TO_INSCRIPTION_ID.as_bytes(), &[0u8; 44])
             .map(|dbrow| {
-                Ok::<_,anyhow::Error>((
+                Ok::<_, anyhow::Error>((
                     Entry::load(dbrow.key.try_into().track_err()?).track_err()?,
                     Entry::load(dbrow.value.try_into().track_err()?).track_err()?,
                 ))
@@ -219,21 +229,19 @@ impl InscriptionIndex {
     }
 
     pub(crate) fn get_homepage_inscriptions(&self) -> Result<Vec<InscriptionId>> {
-        self
-            .database
-            .iter_scan_reverse(db_key!(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID, ""), &[])
+        self.database
+            .iter_scan_reverse(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID.as_bytes(), &[])
             .take(8)
             .map(|dbrow| Entry::load(dbrow.value.try_into().track_err()?).track_err())
             .try_collect()
     }
 
     pub(crate) fn get_feed_inscriptions(&self, n: usize) -> Result<Vec<(u64, InscriptionId)>> {
-        self
-            .database
-            .iter_scan_reverse(db_key!(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID, ""), &[])
+        self.database
+            .iter_scan_reverse(INSCRIPTION_NUMBER_TO_INSCRIPTION_ID.as_bytes(), &[])
             .take(n)
             .map(|dbrow| {
-                Ok::<_,anyhow::Error>((
+                Ok::<_, anyhow::Error>((
                     u64::from_le_bytes(dbrow.key.try_into().track_err()?),
                     Entry::load(dbrow.value.try_into().track_err()?).track_err()?,
                 ))
@@ -246,23 +254,25 @@ impl InscriptionIndex {
         &self,
         inscription_id: InscriptionId,
     ) -> Result<Option<InscriptionEntry>> {
-        let Some(value) = self
-            .database
-            .get(db_key!(
-                INSCRIPTION_ID_TO_INSCRIPTION_ENTRY,
-                String::from_utf8(inscription_id.store().track_err()?.to_vec()).track_err()?
-        )) else { return Ok(None) };
+        let Some(value) = self.database.get(&db_key!(
+            INSCRIPTION_ID_TO_INSCRIPTION_ENTRY,
+            &inscription_id.store().track_err()?
+        )) else {
+            return Ok(None);
+        };
 
         let (part1, rest) = value.split_at(8);
         let (part2, rest) = rest.split_at(8);
         let (part3, rest) = rest.split_at(8);
-        let (part4, part5) = rest.split_at(16);            
+        let (part4, part5) = rest.split_at(16);
         let value1 = u64::from_le_bytes(part1.try_into().anyhow_as("Incorrect length")?);
         let value2 = u64::from_le_bytes(part2.try_into().anyhow_as("Incorrect length")?);
         let value3 = u64::from_le_bytes(part3.try_into().anyhow_as("Incorrect length")?);
         let value4 = u128::from_le_bytes(part4.try_into().anyhow_as("Incorrect length")?);
         let value5 = u32::from_le_bytes(part5.try_into().anyhow_as("Incorrect length")?);
-        InscriptionEntry::load((value1, value2, value3, value4, value5)).track_err().map(Some)
+        InscriptionEntry::load((value1, value2, value3, value4, value5))
+            .track_err()
+            .map(Some)
     }
 
     pub(crate) fn inscriptions_on_output<'tx>(
@@ -273,10 +283,11 @@ impl InscriptionIndex {
             outpoint,
             offset: 0,
         }
-        .store().track_err()?;
+        .store()
+        .track_err()?;
 
         Ok(database
-            .iter_scan_from(db_key!(SATPOINT_TO_INSCRIPTION_ID, ""), &start)
+            .iter_scan_from(SATPOINT_TO_INSCRIPTION_ID.as_bytes(), &start)
             .map(|dbrow| {
                 Ok((
                     Entry::load(dbrow.key.try_into().track_err()?).track_err()?,
