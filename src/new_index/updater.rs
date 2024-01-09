@@ -1,12 +1,13 @@
-use super::{inscriptions_updater::InscriptionUpdater, Store};
+use super::{inscriptions_updater::InscriptionUpdater, BlockEntry, Store};
 use crate::{
     db_key,
     inscription_entries::{
         entry::SatRange,
         index::{
-            Statistic, ID_TO_ENTRY, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS,
-            INSCRIPTION_TXID_TO_TX, NUMBER_TO_ID, OUTPOINT_TO_SATRANGES, OUTPOINT_TO_VALUE,
-            PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID, SAT_TO_SATPOINT, STATISTIC_TO_COUNT, HEIGHT_TO_BLOCK_HASH,
+            Statistic, HEIGHT_TO_BLOCK_HASH, ID_TO_ENTRY, INSCRIPTION_ID_TO_SATPOINT,
+            INSCRIPTION_ID_TO_TXIDS, INSCRIPTION_TXID_TO_TX, NUMBER_TO_ID, OUTPOINT_TO_SATRANGES,
+            OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID, SAT_TO_SATPOINT,
+            STATISTIC_TO_COUNT,
         },
         Entry, Height, OutPointValue, Sat, SatPoint,
     },
@@ -17,9 +18,7 @@ use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{atomic, Arc},
-    thread,
-    time::{Instant, SystemTime},
+    sync::Arc,
 };
 use tokio::sync::mpsc::{error::TryRecvError, Receiver, Sender};
 
@@ -54,6 +53,32 @@ pub(crate) struct Updater {
 }
 
 impl Updater {
+    pub(crate) fn update(
+        block_data: &BlockEntry,
+        store: Arc<Store>,
+        mut outpoint_sender: &mut Sender<OutPoint>,
+        mut value_receiver: &mut Receiver<u64>,
+        mut value_cache: &mut HashMap<OutPoint, u64>,
+    ) -> anyhow::Result<Vec<Txid>> {
+        let mut updater = Self {
+            range_cache: HashMap::new(),
+            // TODO: here should be passed header height instead of this shit
+            height: block_data.entry.height() as u64,
+            index_sats: true,
+            sat_ranges_since_flush: 0,
+            outputs_cached: 0,
+            outputs_inserted_since_flush: 0,
+        };
+
+        updater.index_block(
+            store,
+            &mut outpoint_sender,
+            &mut value_receiver,
+            BlockData::from(block_data.block),
+            &mut value_cache,
+        )
+    }
+
     fn index_block(
         &mut self,
         store: Arc<Store>,
@@ -61,7 +86,7 @@ impl Updater {
         value_receiver: &mut Receiver<u64>,
         block: BlockData,
         value_cache: &mut HashMap<OutPoint, u64>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<Txid>> {
         // If value_receiver still has values something went wrong with the last block
         // Could be an assert, shouldn't recover from this and commit the last block
         let Err(TryRecvError::Empty) = value_receiver.try_recv() else {
@@ -137,6 +162,8 @@ impl Updater {
             store.inscription_db(),
         )
         .anyhow()?;
+
+        let mut shit = Vec::new();
 
         if self.index_sats {
             let mut coinbase_inputs = VecDeque::new();
@@ -227,27 +254,26 @@ impl Updater {
             }
         } else {
             for (tx, txid) in block.txdata.iter().skip(1).chain(block.txdata.first()) {
-                lost_sats += inscription_updater.index_transaction_inscriptions(tx, *txid, None)?;
+                let (lost_sats1, shit2) =
+                    inscription_updater.index_transaction_inscriptions(tx, *txid, None)?;
+                lost_sats += lost_sats1;
+                shit.extend(shit2.into_iter());
             }
         }
 
-        store
-			.inscription_db()
-			.put(
-				&db_key!(STATISTIC_TO_COUNT, &Statistic::LostSats.key().to_be_bytes()),
-				&lost_sats.to_be_bytes(),
-        	);
+        store.inscription_db().put(
+            &db_key!(STATISTIC_TO_COUNT, &Statistic::LostSats.key().to_be_bytes()),
+            &lost_sats.to_be_bytes(),
+        );
 
-		store
-			.inscription_db()
-			.put(
-				&db_key!(HEIGHT_TO_BLOCK_HASH, &self.height.to_be_bytes()),
-				&block.header.block_hash().store()?
-			);
+        store.inscription_db().put(
+            &db_key!(HEIGHT_TO_BLOCK_HASH, &self.height.to_be_bytes()),
+            &block.header.block_hash().store()?,
+        );
 
         self.height += 1;
 
-        Ok(())
+        Ok(shit)
     }
 
     fn index_transaction_sats(
@@ -258,10 +284,14 @@ impl Updater {
         input_sat_ranges: &mut VecDeque<(u128, u128)>,
         inscription_updater: &mut InscriptionUpdater,
         index_inscriptions: bool,
-    ) -> anyhow::Result<()> {
-        if index_inscriptions {
-            inscription_updater.index_transaction_inscriptions(tx, txid, Some(input_sat_ranges))?;
-        }
+    ) -> anyhow::Result<Vec<Txid>> {
+        let shit = if index_inscriptions {
+            inscription_updater
+                .index_transaction_inscriptions(tx, txid, Some(input_sat_ranges))?
+                .1
+        } else {
+            vec![]
+        };
 
         for (vout, output) in tx.output.iter().enumerate() {
             let outpoint = OutPoint {
@@ -307,6 +337,6 @@ impl Updater {
             self.outputs_inserted_since_flush += 1;
         }
 
-        Ok(())
+        Ok(shit)
     }
 }
