@@ -20,8 +20,7 @@ use crate::daemon::Daemon;
 use crate::errors::*;
 use crate::inscription_entries::index::{
     ID_TO_ENTRY, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS, INSCRIPTION_TXID_TO_TX,
-    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SATPOINT_TO_INSCRIPTION_ID,
-    SAT_TO_INSCRIPTION_ID,
+    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID,
 };
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
@@ -98,6 +97,10 @@ impl Store {
 
     pub fn cache_db(&self) -> &DB {
         &self.cache_db
+    }
+
+    pub fn inscription_db(&self) -> &DB {
+        &self.inscription_db
     }
 
     pub fn done_initial_sync(&self) -> bool {
