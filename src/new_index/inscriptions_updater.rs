@@ -1,4 +1,4 @@
-use bitcoin::consensus::Encodable;
+use bitcoin::{consensus::Encodable, TxIn};
 use std::{
     collections::{HashMap, VecDeque},
     convert::TryInto,
@@ -106,7 +106,7 @@ impl<'a> InscriptionUpdater<'a> {
         tx: &Transaction,
         txid: Txid,
         input_sat_ranges: Option<&VecDeque<(u128, u128)>>,
-    ) -> Result<u64> {
+    ) -> Result<(u64, Vec<Txid>)> {
         let mut inscriptions = Vec::new();
 
         let mut input_value = 0;
@@ -298,7 +298,10 @@ impl<'a> InscriptionUpdater<'a> {
                 self.update_inscription_location(input_sat_ranges, flotsam, new_satpoint)?;
             }
 
-            Ok(self.reward - output_value)
+            Ok((
+                self.reward - output_value,
+                inscriptions.map(|shit| shit.inscription_id.txid).collect(),
+            ))
         } else {
             let reward = self.reward;
             self.flotsam.extend(inscriptions.map(|flotsam| Flotsam {
@@ -306,7 +309,10 @@ impl<'a> InscriptionUpdater<'a> {
                 ..flotsam
             }));
             self.reward += input_value - output_value;
-            Ok(0)
+            Ok((
+                0,
+                inscriptions.map(|shit| shit.inscription_id.txid).collect(),
+            ))
         }
     }
 
