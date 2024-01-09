@@ -2,7 +2,6 @@ use bitcoin::consensus::Encodable;
 use std::{
     collections::{HashMap, VecDeque},
     convert::TryInto,
-    sync::RwLock,
 };
 
 use crate::{
@@ -49,7 +48,6 @@ pub(crate) struct InscriptionUpdater<'a> {
     outpoint_to_value: &'a str,
     reward: u64,
     sat_to_inscription_id: &'a str,
-    satpoint_to_id: &'a str,
     timestamp: u32,
     value_cache: &'a parking_lot::RwLock<HashMap<OutPoint, u64>>,
     database: &'a DB,
@@ -67,7 +65,6 @@ impl<'a> InscriptionUpdater<'a> {
         number_to_id: &'a str,
         outpoint_to_value: &'a str,
         sat_to_inscription_id: &'a str,
-        satpoint_to_id: &'a str,
         timestamp: u32,
         value_cache: &'a parking_lot::RwLock<HashMap<OutPoint, u64>>,
         database: &'a DB,
@@ -98,7 +95,6 @@ impl<'a> InscriptionUpdater<'a> {
             outpoint_to_value,
             reward: Height(height).subsidy(),
             sat_to_inscription_id,
-            satpoint_to_id,
             timestamp,
             value_cache,
             database,
