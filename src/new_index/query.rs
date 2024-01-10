@@ -1,3 +1,4 @@
+use bitcoin::hashes::Hash;
 use rayon::prelude::*;
 
 use std::collections::{BTreeSet, HashMap};
@@ -7,7 +8,8 @@ use std::time::{Duration, Instant};
 use crate::chain::{Network, OutPoint, Transaction, TxOut, Txid};
 use crate::config::Config;
 use crate::daemon::Daemon;
-use crate::errors::*;
+use crate::inscription_entries::index::TXID_IS_INSCRIPTION;
+use crate::{errors::*, db_key};
 use crate::new_index::{ChainQuery, Mempool, ScriptStats, SpendingInput, Utxo};
 use crate::util::{is_spendable, BlockId, Bytes, TransactionStatus};
 
@@ -78,9 +80,10 @@ impl Query {
         Ok(txid)
     }
 
-    pub fn utxo(&self, scripthash: &[u8]) -> Result<Vec<Utxo>> {
+    pub fn utxo(&self, scripthash: &[u8], inscription: bool) -> Result<Vec<Utxo>> {
         let mut utxos = self.chain.utxo(
             scripthash,
+            inscription,
             self.config.utxos_limit,
             super::db::DBFlush::Enable,
         )?;

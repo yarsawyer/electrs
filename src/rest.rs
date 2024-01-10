@@ -833,6 +833,31 @@ fn handle_request(
             &Method::GET,
             Some(script_type @ &"address"),
             Some(script_str),
+            Some(&"inscription"),
+            Some(&"utxo"),
+            None,
+        )
+        | (
+            &Method::GET,
+            Some(script_type @ &"scripthash"),
+            Some(script_str),
+            Some(&"inscription"),
+            Some(&"utxo"),
+            None,
+        ) => {
+            let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
+            let utxos: Vec<UtxoValue> = query
+                .utxo(&script_hash[..], true)?
+                .into_iter()
+                .map(UtxoValue::from)
+                .collect();
+            // XXX paging?
+            json_response(utxos, TTL_SHORT)
+        }
+        (
+            &Method::GET,
+            Some(script_type @ &"address"),
+            Some(script_str),
             Some(&"utxo"),
             None,
             None,
@@ -847,7 +872,7 @@ fn handle_request(
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
             let utxos: Vec<UtxoValue> = query
-                .utxo(&script_hash[..])?
+                .utxo(&script_hash[..], false)?
                 .into_iter()
                 .map(UtxoValue::from)
                 .collect();
