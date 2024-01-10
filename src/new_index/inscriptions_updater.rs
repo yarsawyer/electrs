@@ -1,7 +1,7 @@
 use bitcoin::{consensus::Encodable, TxIn};
 use std::{
     collections::{HashMap, VecDeque},
-    convert::TryInto,
+    convert::TryInto, sync::Arc,
 };
 
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
     inscription_entries::{
         entry::{Entry, InscriptionEntry},
         height::Height,
-        index::{InscriptionIndex, NUMBER_TO_ID},
+        index::{InscriptionIndex, NUMBER_TO_ID, INSCRIPTION_ID_TO_TXIDS},
         inscription::Inscription,
         inscription::ParsedInscription,
         inscription_id::InscriptionId,
@@ -21,14 +21,16 @@ use anyhow::{anyhow, Result};
 use bitcoin::consensus::Decodable;
 use bitcoin::{hashes::Hash, OutPoint, Transaction, Txid};
 
-use super::DB;
+use super::{DB, Store};
 
+#[derive(Clone)]
 pub(super) struct Flotsam {
     inscription_id: InscriptionId,
     offset: u64,
     origin: Origin,
 }
 
+#[derive(Clone)]
 enum Origin {
     New(u64),
     Old(SatPoint),
@@ -103,48 +105,54 @@ impl<'a> InscriptionUpdater<'a> {
 
     pub(crate) fn index_transaction_inscriptions(
         &mut self,
+        store: Arc<Store>,
         tx: &Transaction,
         txid: Txid,
         input_sat_ranges: Option<&VecDeque<(u128, u128)>>,
-    ) -> Result<(u64, Vec<Txid>)> {
+    ) -> Result<(u64, bool)> {
         let mut inscriptions = Vec::new();
+        let mut is_inscription = false;
+        
+        let mut writer = vec![];
+        tx.consensus_encode(&mut writer)?;
+        store.inscription_db().put(&db_key!("T", &txid.into_inner()), &writer);
 
-        let mut input_value = 0;
-        for tx_in in &tx.input {
-            if tx_in.previous_output.is_null() {
-                input_value += Height(self.height).subsidy();
-            } else {
-                for bibas in
-                    InscriptionIndex::inscriptions_on_output(self.database, tx_in.previous_output)
-                        .track_err()?
-                {
-                    let (old_satpoint, inscription_id) = bibas.track_err()?;
+        // let mut input_value = 0;
+        // for tx_in in &tx.input {
+        //     if tx_in.previous_output.is_null() {
+        //         input_value += Height(self.height).subsidy();
+        //     } else {
+        //         for bibas in
+        //             InscriptionIndex::inscriptions_on_output(self.database, tx_in.previous_output)
+        //                 .track_err()?
+        //         {
+        //             let (old_satpoint, inscription_id) = bibas.track_err()?;
 
-                    inscriptions.push(Flotsam {
-                        offset: input_value + old_satpoint.offset,
-                        inscription_id,
-                        origin: Origin::Old(old_satpoint),
-                    });
-                }
+        //             inscriptions.push(Flotsam {
+        //                 offset: input_value + old_satpoint.offset,
+        //                 inscription_id,
+        //                 origin: Origin::Old(old_satpoint),
+        //             });
+        //         }
 
-                input_value +=
-                    if let Some(value) = self.value_cache.write().remove(&tx_in.previous_output) {
-                        value
-                    } else if let Some(value) = self.database.remove(&db_key!(
-                        self.outpoint_to_value,
-                        &tx_in.previous_output.store().track_err()?
-                    )) {
-                        u64::from_le_bytes(value.try_into().track_err()?)
-                    } else {
-                        return Err(anyhow!(
-                            "failed to get transaction for {}",
-                            tx_in.previous_output.txid
-                        ));
-                    }
-            }
-        }
+        //         input_value +=
+        //             if let Some(value) = self.value_cache.write().remove(&tx_in.previous_output) {
+        //                 value
+        //             } else if let Some(value) = self.database.remove(&db_key!(
+        //                 self.outpoint_to_value,
+        //                 &tx_in.previous_output.store().track_err()?
+        //             )) {
+        //                 u64::from_le_bytes(value.try_into().track_err()?)
+        //             } else {
+        //                 return Err(anyhow!(
+        //                     "failed to get transaction for {}",
+        //                     tx_in.previous_output.txid
+        //                 ));
+        //             }
+        //     }
+        // }
 
-        if inscriptions.iter().all(|flotsam| flotsam.offset != 0) {
+        if true {
             let previous_txid = tx.input[0].previous_output.txid;
             let previous_txid_bytes: [u8; 32] = previous_txid.into_inner();
             let mut txids_vec = vec![];
@@ -159,8 +167,8 @@ impl<'a> InscriptionUpdater<'a> {
                     txids_vec = txids.to_vec();
                     for i in 0..txids.len() / 32 {
                         let txid = &txids[i * 32..i * 32 + 32];
-                        let tx_result = self.database.get(&db_key!(self.txid_to_tx, txid));
-                        let tx_result = tx_result.track_err()?;
+                       
+                        let tx_result = store.inscription_db().get(&db_key!("T", txid)).anyhow()?;
                         let tx_buf = tx_result;
                         let mut cursor = std::io::Cursor::new(tx_buf);
                         let tx = bitcoin::Transaction::consensus_decode(&mut cursor)?;
@@ -174,7 +182,7 @@ impl<'a> InscriptionUpdater<'a> {
                 }
             };
 
-            match Inscription::from_transactions(txs) {
+            match Inscription::from_transactions(txs.clone()) {
                 ParsedInscription::None => {
                     // todo: clean up db
                 }
@@ -185,29 +193,18 @@ impl<'a> InscriptionUpdater<'a> {
 
                     self.database
                         .remove(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes));
+
                     self.database.put(
                         &db_key!(self.partial_txid_to_txids, &txid.into_inner()),
                         txids_vec.as_slice(),
                     );
-
-                    let mut tx_buf = vec![];
-                    tx.consensus_encode(&mut tx_buf)?;
-                    self.database.put(
-                        &db_key!(self.txid_to_tx, &txid.into_inner()),
-                        tx_buf.as_slice(),
-                    );
+                   
+                    is_inscription = true;
                 }
 
                 ParsedInscription::Complete(_inscription) => {
                     self.database
                         .remove(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes));
-
-                    let mut tx_buf = vec![];
-                    tx.consensus_encode(&mut tx_buf)?;
-                    self.database.put(
-                        &db_key!(self.txid_to_tx, &txid.into_inner()),
-                        tx_buf.as_slice(),
-                    );
 
                     let mut txid_vec = txid.into_inner().to_vec();
                     txids_vec.append(&mut txid_vec);
@@ -220,76 +217,78 @@ impl<'a> InscriptionUpdater<'a> {
                             32,
                         )
                     }
-                    self.database.put(
-                        &db_key!(self.id_to_txids, &inscription_id),
-                        txids_vec.as_slice(),
-                    );
 
                     let og_inscription_id = InscriptionId {
                         txid: Txid::from_slice(&txids_vec[0..32]).track_err()?,
                         index: 0,
                     };
+                    store.inscription_db().put(&db_key!(INSCRIPTION_ID_TO_TXIDS,&og_inscription_id.store().anyhow()?), &txids_vec);
+                    //store.inscription_db().put(&db_key!(INSCRIPTION_ID_TO_INSCRIPTION_ENTRY,&og_inscription_id.store().anyhow()?), _inscription.);
 
                     inscriptions.push(Flotsam {
                         inscription_id: og_inscription_id,
                         offset: 0,
                         origin: Origin::New(
-                            input_value - tx.output.iter().map(|txout| txout.value).sum::<u64>(),
+                            0
+                            //input_value - tx.output.iter().map(|txout| txout.value).sum::<u64>(),
                         ),
                     });
+                    is_inscription = true;
                 }
             }
         };
 
-        let is_coinbase = tx
-            .input
-            .first()
-            .map(|tx_in| tx_in.previous_output.is_null())
-            .unwrap_or_default();
+        // let is_coinbase = tx
+        //     .input
+        //     .first()
+        //     .map(|tx_in| tx_in.previous_output.is_null())
+        //     .unwrap_or_default();
 
-        if is_coinbase {
-            inscriptions.append(&mut self.flotsam);
-        }
+        // if is_coinbase {
+        //     inscriptions.append(&mut self.flotsam);
+        // }
 
-        inscriptions.sort_by_key(|flotsam| flotsam.offset);
+        //inscriptions.sort_by_key(|flotsam| flotsam.offset);
+        
+        let clone_govna = inscriptions.clone().into_iter().peekable();
         let mut inscriptions = inscriptions.into_iter().peekable();
 
         let mut output_value = 0;
         for (vout, tx_out) in tx.output.iter().enumerate() {
-            let end = output_value + tx_out.value;
+            output_value += tx_out.value;
 
-            while let Some(flotsam) = inscriptions.peek() {
-                if flotsam.offset >= end {
-                    break;
-                }
+            // while let Some(flotsam) = inscriptions.peek() {
+            //     if flotsam.offset >= end {
+            //         break;
+            //     }
 
-                let new_satpoint = SatPoint {
-                    outpoint: OutPoint {
-                        txid,
-                        vout: vout.try_into().track_err()?,
-                    },
-                    offset: flotsam.offset - output_value,
-                };
+            //     let new_satpoint = SatPoint {
+            //         outpoint: OutPoint {
+            //             txid,
+            //             vout: vout.try_into().track_err()?,
+            //         },
+            //         offset: flotsam.offset - output_value,
+            //     };
 
-                self.update_inscription_location(
-                    input_sat_ranges,
-                    inscriptions.next().track_err()?,
-                    new_satpoint,
-                )?;
-            }
+            //     self.update_inscription_location(
+            //         input_sat_ranges,
+            //         inscriptions.next().track_err()?,
+            //         new_satpoint,
+            //     )?;
+            // }
 
-            output_value = end;
+            // output_value = end;
 
-            self.value_cache.write().insert(
-                OutPoint {
-                    vout: vout.try_into().track_err()?,
-                    txid,
-                },
-                tx_out.value,
-            );
+            // self.value_cache.write().insert(
+            //     OutPoint {
+            //         vout: vout.try_into().track_err()?,
+            //         txid,
+            //     },
+            //     tx_out.value,
+            // );
         }
 
-        if is_coinbase {
+        if false {
             for flotsam in inscriptions {
                 let new_satpoint = SatPoint {
                     outpoint: OutPoint::null(),
@@ -300,18 +299,18 @@ impl<'a> InscriptionUpdater<'a> {
 
             Ok((
                 self.reward - output_value,
-                inscriptions.map(|shit| shit.inscription_id.txid).collect(),
+                is_inscription,
             ))
         } else {
-            let reward = self.reward;
-            self.flotsam.extend(inscriptions.map(|flotsam| Flotsam {
-                offset: reward + flotsam.offset,
-                ..flotsam
-            }));
-            self.reward += input_value - output_value;
+            // let reward = self.reward;
+            // self.flotsam.extend(inscriptions.map(|flotsam| Flotsam {
+            //     offset: reward + flotsam.offset,
+            //     ..flotsam
+            // }));
+            // self.reward += input_value - output_value;
             Ok((
                 0,
-                inscriptions.map(|shit| shit.inscription_id.txid).collect(),
+                is_inscription,
             ))
         }
     }

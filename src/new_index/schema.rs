@@ -17,10 +17,11 @@ use crate::chain::{
 };
 use crate::config::Config;
 use crate::daemon::Daemon;
-use crate::errors::*;
+use crate::inscription_entries::Entry;
+use crate::{errors::*, db_key};
 use crate::inscription_entries::index::{
     ID_TO_ENTRY, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS, INSCRIPTION_TXID_TO_TX,
-    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID,
+    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID, OUTPOINT_TO_SATRANGES,
 };
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
@@ -316,7 +317,6 @@ impl Indexer {
             let _timer = self.start_timer("add_write");
             self.store.txstore_db.write(rows, self.flush);
         }
-
         self.store
             .added_blockhashes
             .write()
@@ -1028,31 +1028,49 @@ fn add_blocks(
     //      B{blockhash} → {header}
     //      X{blockhash} → {txid1}...{txidN}
     //      M{blockhash} → {tx_count}{size}{weight}
+    store
+        .inscription_db()
+        .put(&db_key!(OUTPOINT_TO_SATRANGES,&OutPoint::null().store().unwrap()), &[]);
+
+    // tx.open_table(OUTPOINT_TO_SAT_RANGES)?
+    // .insert(&OutPoint::null().store(),)?;
 
     block_entries
         .par_iter() // serialization is CPU-intensive
         .map(|b| {
-            let mut shit = HashMap::new();
-            let (mut sender, mut receiver) = tokio::sync::mpsc::channel(16);
-            let (mut sender2, mut receiver2) = tokio::sync::mpsc::channel(16);
-
             let mut rows = vec![];
             let blockhash = full_hash(&b.entry.hash()[..]);
-            let txids: Vec<Txid> = b.block.txdata.iter().map(|tx| tx.txid()).collect();
+            let txids = b.block.txdata.iter().map(|x| x.txid()).collect_vec();
 
-            let updater: HashSet<Txid> =
-                Updater::update(b, store.clone(), &mut sender2, &mut receiver, &mut shit)
-                    .unwrap()
-                    .into_iter()
-                    .collect();
+            // let updater: HashSet<Txid> =
+            //     Updater::update(b, store.clone(), &mut sender2, &mut receiver, &mut shit)
+            //         .unwrap()
+            //         .into_iter()
+            //         .collect();
 
-            for tx in b
-                .block
-                .txdata
-                .iter()
-                .filter(|tx| updater.contains(&tx.txid()))
-            {
+
+            let mut inscription_updater = InscriptionUpdater::new(
+                22490,
+                INSCRIPTION_ID_TO_SATPOINT,
+                INSCRIPTION_ID_TO_TXIDS,
+                INSCRIPTION_TXID_TO_TX,
+                PARTIAL_TXID_TO_TXIDS,
+                ID_TO_ENTRY,
+                0,
+                NUMBER_TO_ID,
+                OUTPOINT_TO_VALUE,
+                SAT_TO_INSCRIPTION_ID,
+                0,
+                store.outpoint_cache(),
+                store.inscription_db(),
+            )
+            .anyhow().unwrap();
+       
+
+            for tx in &b.block.txdata {
+                inscription_updater.index_transaction_inscriptions(store.clone(), tx, tx.txid(), None).unwrap();
                 add_transaction(tx, blockhash, &mut rows, iconfig);
+               
             }
 
             if !iconfig.light_mode {
