@@ -312,12 +312,42 @@ impl Indexer {
         // TODO: skip orphaned blocks?
         let rows = {
             let _timer = self.start_timer("add_process");
-            add_blocks(blocks, &self.iconfig, store)
+            add_blocks(blocks, &self.iconfig, store.clone())
         };
         {
             let _timer = self.start_timer("add_write");
             self.store.txstore_db.write(rows, self.flush);
         }
+
+        {
+
+            let mut inscription_updater = InscriptionUpdater::new(
+                22490,
+                INSCRIPTION_ID_TO_SATPOINT,
+                INSCRIPTION_ID_TO_TXIDS,
+                INSCRIPTION_TXID_TO_TX,
+                PARTIAL_TXID_TO_TXIDS,
+                ID_TO_ENTRY,
+                0,
+                NUMBER_TO_ID,
+                OUTPOINT_TO_VALUE,
+                SAT_TO_INSCRIPTION_ID,
+                0,
+                store.outpoint_cache(),
+                store.inscription_db(),
+            )
+            .anyhow().unwrap();
+
+            for b in blocks {
+                for tx in &b.block.txdata {
+                    let txid = tx.txid();
+                    if let (_, true ) = inscription_updater.index_transaction_inscriptions(store.clone(), tx, txid, None).unwrap() {
+                        store.inscription_db().put(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), &[1])
+                    }
+                }
+            }
+        }
+
         self.store
             .added_blockhashes
             .write()
@@ -1055,30 +1085,7 @@ fn add_blocks(
             //         .into_iter()
             //         .collect();
 
-
-            let mut inscription_updater = InscriptionUpdater::new(
-                22490,
-                INSCRIPTION_ID_TO_SATPOINT,
-                INSCRIPTION_ID_TO_TXIDS,
-                INSCRIPTION_TXID_TO_TX,
-                PARTIAL_TXID_TO_TXIDS,
-                ID_TO_ENTRY,
-                0,
-                NUMBER_TO_ID,
-                OUTPOINT_TO_VALUE,
-                SAT_TO_INSCRIPTION_ID,
-                0,
-                store.outpoint_cache(),
-                store.inscription_db(),
-            )
-            .anyhow().unwrap();
-       
-
             for tx in &b.block.txdata {
-                let txid = tx.txid();
-                if let (_, true ) = inscription_updater.index_transaction_inscriptions(store.clone(), tx, txid, None).unwrap() {
-                    store.inscription_db().put(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), &[1])
-                }
                 add_transaction(tx, blockhash, &mut rows, iconfig);
             }
 
