@@ -100,7 +100,7 @@ define_prefix! { PARTIAL_TXID_TO_TXIDS, PTTT }
 define_prefix! { OUTPOINT_TO_VALUE, OTV }
 define_prefix! { OUTPOINT_TO_SATRANGES, OTSR }
 define_prefix! { STATISTIC_TO_COUNT, STC }
-define_prefix! { HEIGHT_TO_BLOCK_HASH, STC }
+define_prefix! { HEIGHT_TO_BLOCK_HASH, HTBH }
 define_prefix! { ID_TO_ENTRY, ITE }
 define_prefix! { NUMBER_TO_ID, NTI }
 
