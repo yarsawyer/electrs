@@ -102,6 +102,7 @@ define_prefix! { OUTPOINT_TO_SATRANGES, OTSR }
 define_prefix! { STATISTIC_TO_COUNT, STC }
 define_prefix! { HEIGHT_TO_BLOCK_HASH, HTBH }
 define_prefix! { ID_TO_ENTRY, ITE }
+define_prefix! { TXID_IS_INSCRIPTION, TII }
 define_prefix! { NUMBER_TO_ID, NTI }
 
 impl InscriptionIndex {

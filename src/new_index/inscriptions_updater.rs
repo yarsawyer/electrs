@@ -112,10 +112,10 @@ impl<'a> InscriptionUpdater<'a> {
     ) -> Result<(u64, bool)> {
         let mut inscriptions = Vec::new();
         let mut is_inscription = false;
-        
-        let mut writer = vec![];
-        tx.consensus_encode(&mut writer)?;
-        store.inscription_db().put(&db_key!("T", &txid.into_inner()), &writer);
+
+        //let mut writer = vec![];
+        //tx.consensus_encode(&mut writer)?;
+        //store.inscription_db().put(&db_key!("T", &txid.into_inner()), &writer);
 
         // let mut input_value = 0;
         // for tx_in in &tx.input {
@@ -168,7 +168,7 @@ impl<'a> InscriptionUpdater<'a> {
                     for i in 0..txids.len() / 32 {
                         let txid = &txids[i * 32..i * 32 + 32];
                        
-                        let tx_result = store.inscription_db().get(&db_key!("T", txid)).anyhow()?;
+                        let tx_result = store.txstore_db().get(&db_key!("T", txid)).anyhow()?;
                         let tx_buf = tx_result;
                         let mut cursor = std::io::Cursor::new(tx_buf);
                         let tx = bitcoin::Transaction::consensus_decode(&mut cursor)?;
@@ -223,7 +223,6 @@ impl<'a> InscriptionUpdater<'a> {
                         index: 0,
                     };
                     store.inscription_db().put(&db_key!(INSCRIPTION_ID_TO_TXIDS,&og_inscription_id.store().anyhow()?), &txids_vec);
-                    //store.inscription_db().put(&db_key!(INSCRIPTION_ID_TO_INSCRIPTION_ENTRY,&og_inscription_id.store().anyhow()?), _inscription.);
 
                     inscriptions.push(Flotsam {
                         inscription_id: og_inscription_id,

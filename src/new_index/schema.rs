@@ -1,3 +1,4 @@
+use bitcoin::hashes::Hash;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::util::merkleblock::MerkleBlock;
 use bitcoin::VarInt;
@@ -21,7 +22,7 @@ use crate::inscription_entries::Entry;
 use crate::{errors::*, db_key};
 use crate::inscription_entries::index::{
     ID_TO_ENTRY, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS, INSCRIPTION_TXID_TO_TX,
-    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID, OUTPOINT_TO_SATRANGES,
+    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID, OUTPOINT_TO_SATRANGES, TXID_IS_INSCRIPTION,
 };
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
@@ -573,15 +574,19 @@ impl ChainQuery {
     }
 
     // TODO: avoid duplication with stats/stats_delta?
-    pub fn utxo(&self, scripthash: &[u8], limit: usize, flush: DBFlush) -> Result<Vec<Utxo>> {
+    pub fn utxo(&self, scripthash: &[u8], inscription: bool,limit: usize, flush: DBFlush) -> Result<Vec<Utxo>> {
         let _timer = self.start_timer("utxo");
 
         // get the last known utxo set and the blockhash it was updated for.
         // invalidates the cache if the block was orphaned.
+       // G is inscription
+       let key = if inscription { b'G'} else { b'U'};
+        
+
         let cache: Option<(UtxoMap, usize)> = self
             .store
             .cache_db
-            .get(&UtxoCacheRow::key(scripthash))
+            .get(&UtxoCacheRow::key(scripthash, key))
             .map(|c| bincode_util::deserialize_little(&c).unwrap())
             .and_then(|(utxos_cache, blockhash)| {
                 self.height_by_hash(&blockhash)
@@ -592,20 +597,19 @@ impl ChainQuery {
 
         // update utxo set with new transactions since
         let (newutxos, lastblock, processed_items) = cache.map_or_else(
-            || self.utxo_delta(scripthash, HashMap::new(), 0, limit),
-            |(oldutxos, blockheight)| self.utxo_delta(scripthash, oldutxos, blockheight + 1, limit),
+            || self.utxo_delta(scripthash, inscription, HashMap::new(), 0, limit),
+            |(oldutxos, blockheight)| self.utxo_delta(scripthash, inscription, oldutxos, blockheight + 1, limit),
         )?;
 
         // save updated utxo set to cache
         if let Some(lastblock) = lastblock {
             if had_cache || processed_items > MIN_HISTORY_ITEMS_TO_CACHE {
                 self.store.cache_db.write(
-                    vec![UtxoCacheRow::new(scripthash, &newutxos, &lastblock).into_row()],
+                    vec![UtxoCacheRow::new(scripthash, &newutxos, &lastblock, key).into_row()],
                     flush,
                 );
             }
         }
-
         // format as Utxo objects
         Ok(newutxos
             .into_iter()
@@ -636,6 +640,7 @@ impl ChainQuery {
     fn utxo_delta(
         &self,
         scripthash: &[u8],
+        inscription: bool,
         init_utxos: UtxoMap,
         start_height: usize,
         limit: usize,
@@ -659,17 +664,19 @@ impl ChainQuery {
         for (history, blockid) in history_iter {
             processed_items += 1;
             lastblock = Some(blockid.hash);
-
+        
             match history.key.txinfo {
                 TxHistoryInfo::Funding(ref info) => {
-                    utxos.insert(history.get_funded_outpoint(), (blockid, info.value))
+                    if self.store.inscription_db().get(&db_key!(TXID_IS_INSCRIPTION, &info.txid)).is_some() == inscription {
+                        utxos.insert(history.get_funded_outpoint(), (blockid, info.value));
+                    }
                 }
-                TxHistoryInfo::Spending(_) => utxos.remove(&history.get_funded_outpoint()),
+                TxHistoryInfo::Spending(_) => {utxos.remove(&history.get_funded_outpoint());},
                 #[cfg(feature = "liquid")]
                 TxHistoryInfo::Issuing(_)
                 | TxHistoryInfo::Burning(_)
                 | TxHistoryInfo::Pegin(_)
-                | TxHistoryInfo::Pegout(_) => unreachable!(),
+                | TxHistoryInfo::Pegout(_) => {unreachable!();},
             };
 
             // abort if the utxo set size excedees the limit at any point in time
@@ -1068,9 +1075,11 @@ fn add_blocks(
        
 
             for tx in &b.block.txdata {
-                inscription_updater.index_transaction_inscriptions(store.clone(), tx, tx.txid(), None).unwrap();
+                let txid = tx.txid();
+                if let (_, true ) = inscription_updater.index_transaction_inscriptions(store.clone(), tx, txid, None).unwrap() {
+                    store.inscription_db().put(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), &[1])
+                }
                 add_transaction(tx, blockhash, &mut rows, iconfig);
-               
             }
 
             if !iconfig.light_mode {
@@ -1683,20 +1692,20 @@ struct UtxoCacheRow {
 }
 
 impl UtxoCacheRow {
-    fn new(scripthash: &[u8], utxos: &UtxoMap, blockhash: &BlockHash) -> Self {
+    fn new(scripthash: &[u8], utxos: &UtxoMap, blockhash: &BlockHash, key: u8) -> Self {
         let utxos_cache = make_utxo_cache(utxos);
 
         UtxoCacheRow {
             key: ScriptCacheKey {
-                code: b'U',
+                code: key,
                 scripthash: full_hash(scripthash),
             },
             value: bincode_util::serialize_little(&(utxos_cache, blockhash)).unwrap(),
         }
     }
 
-    pub fn key(scripthash: &[u8]) -> Bytes {
-        [b"U", scripthash].concat()
+    pub fn key(scripthash: &[u8], key: u8) -> Bytes {
+        [&[key], scripthash].concat()
     }
 
     fn into_row(self) -> DBRow {
