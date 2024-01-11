@@ -5,6 +5,7 @@ extern crate log;
 extern crate electrs;
 
 use error_chain::ChainedError;
+use itertools::Itertools;
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +16,7 @@ use electrs::{
     electrum::RPC as ElectrumRPC,
     errors::*,
     metrics::Metrics,
-    new_index::{precache, ChainQuery, FetchFrom, Indexer, Mempool, Query, Store},
+    new_index::{precache, ChainQuery, FetchFrom, Indexer, Mempool, Query, Store, schema::InscriptionParseBlock},
     rest,
     signal::Waiter,
 };
@@ -68,6 +69,18 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &config,
         &metrics,
     ));
+  
+    //todo: handle this .unwrap() stupid bitch
+    let Some(raw_hash) = store.txstore_db().get(b"t") else {
+        panic!("PO PIZDE VSE POSHLO");
+    };
+    let tip_hash = bitcoin::consensus::encode::deserialize(&raw_hash).expect("invalid chain tip in `t`");
+    let block_from = indexer.get_block_height(tip_hash).unwrap_or(config.first_inscription_block);
+
+    indexer.index_inscription(
+        chain.clone(),
+        InscriptionParseBlock::FromHeight(block_from)
+    ).unwrap();
 
     let mempool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         Arc::clone(&chain),
@@ -133,6 +146,9 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         if current_tip != tip {
             indexer.update(&daemon, Arc::clone(&store))?;
             tip = current_tip;
+            indexer.index_inscription(
+                chain.clone(), InscriptionParseBlock::Hash(tip)
+            ).unwrap();
         };
 
         // Update mempool

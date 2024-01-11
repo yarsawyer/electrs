@@ -56,6 +56,7 @@ pub struct Config {
     pub rest_default_block_limit: usize,
     pub rest_default_chain_txs_per_page: usize,
     pub rest_default_max_mempool_txs: usize,
+    pub first_inscription_block: usize,
 
 
     #[cfg(feature = "electrum-discovery")]
@@ -85,6 +86,12 @@ impl Config {
                 Arg::with_name("version")
                     .long("version")
                     .help("Print out the version of this app and quit immediately."),
+            )
+            .arg(
+                Arg::with_name("first_inscription_block")
+                    .short("fib")
+                    .long("first_inscription_block")
+                    .help("Бох поможет"),
             )
             .arg(
                 Arg::with_name("verbosity")
@@ -282,6 +289,8 @@ impl Config {
         let db_dir = Path::new(m.value_of("db_dir").unwrap_or("./db"));
         let db_path = db_dir.join(network_name);
 
+        let first_inscription_block: usize = m.value_of("first_inscription_block").unwrap_or("22490").parse().unwrap();
+
 
         let default_daemon_port = match network_type {
             Network::Bellscoin => 9982,
@@ -362,6 +371,7 @@ impl Config {
         });
         log.init().expect("logging initialization failed");
         let config = Config {
+            first_inscription_block,
             log,
             network_type,
             db_path,

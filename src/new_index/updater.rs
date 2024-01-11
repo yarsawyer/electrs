@@ -1,26 +1,12 @@
+use crate::inscription_entries::OutPointValue;
+
 use super::{inscriptions_updater::InscriptionUpdater, BlockEntry, Store};
-use crate::{
-    db_key,
-    inscription_entries::{
-        entry::SatRange,
-        index::{
-            Statistic, HEIGHT_TO_BLOCK_HASH, ID_TO_ENTRY, INSCRIPTION_ID_TO_SATPOINT,
-            INSCRIPTION_ID_TO_TXIDS, INSCRIPTION_TXID_TO_TX, NUMBER_TO_ID, OUTPOINT_TO_SATRANGES,
-            OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID, SAT_TO_SATPOINT,
-            STATISTIC_TO_COUNT,
-        },
-        Entry, Height, OutPointValue, Sat, SatPoint,
-    },
-    util::errors::AsAnyhow,
-};
 use bitcoin::{Block, BlockHeader, OutPoint, Transaction, Txid};
-use std::convert::TryFrom;
-use std::convert::TryInto;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::Arc,
 };
-use tokio::sync::mpsc::{error::TryRecvError, Receiver, Sender, UnboundedSender, UnboundedReceiver};
+use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver};
 
 struct BlockData {
     header: BlockHeader,
@@ -90,11 +76,9 @@ impl Updater {
         todo!()
         // // If value_receiver still has values something went wrong with the last block
         // // Could be an assert, shouldn't recover from this and commit the last block
-        // error!("1 DICK");
         // // let Err(TryRecvError::Empty) = value_receiver.try_recv() else {
         // //     anyhow::bail!("Previous block did not consume all input values");
         // //};
-        // error!("2 DICK");
 
         // // TODO SHIT HERE
         // let first_inscription_height = 22490;
@@ -109,23 +93,19 @@ impl Updater {
         // //         .collect::<HashSet<_>>();
         // //     for (tx, _) in &block.txdata {
         // //         for input in &tx.input {
-        // //             error!("2.1 DICK");
         // //             let prev_output = input.previous_output;
         // //             // We don't need coinbase input value
                     
         // //             if prev_output.is_null() {
-        // //                 error!("NO DICK 1");
         // //                 continue;
         // //             }
         // //             // We don't need input values from txs earlier in the block, since they'll be added to value_cache
         // //             // when the tx is indexed
         // //             if txids.contains(&prev_output.txid) {
-        // //                 error!("NO DICK 2");
         // //                 continue;
         // //             }
         // //             // We don't need input values we already have in our value_cache from earlier blocks
         // //             if value_cache.contains_key(&prev_output) {
-        // //                 error!("NO DICK 3");
         // //                 continue;
         // //             }
                     
@@ -134,20 +114,15 @@ impl Updater {
         // //             let outpoint_to_value = store
         // //                 .inscription_db()
         // //                 .get(&db_key!(OUTPOINT_TO_VALUE, &prev_output.store()?));
-        // //             error!("2.2 DICK");
         // //             if outpoint_to_value.is_some() {
-        // //                 error!("NO DICK 4");
         // //                 continue;
         // //             }
-        // //             error!("2.3 DICK");
         // //             // We don't know the value of this tx input. Send this outpoint to background thread to be fetched
         // //             //outpoint_sender.send(prev_output)?;
-        // //             error!("2.4 DICK");
         // //         }
         // //     }
         // // }
 
-        // error!("3 DICK");
         // // let mut lost_sats = u64::from_be_bytes(
         // //     store
         // //         .inscription_db()
@@ -177,7 +152,6 @@ impl Updater {
         // )
         // .anyhow()?;
 
-        // error!("4 DICK");
 
         // let mut shit = Vec::new();
 
@@ -276,8 +250,6 @@ impl Updater {
         //         shit.extend(shit2.into_iter());
         //     }
         // }
-
-        // error!("5 DICK");
 
         // // store.inscription_db().put(
         // //     &db_key!(STATISTIC_TO_COUNT, &Statistic::LostSats.key().to_be_bytes()),
