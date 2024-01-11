@@ -1,4 +1,6 @@
+use bitcoin::consensus::Decodable;
 use bitcoin::hashes::Hash;
+use bitcoin::hashes::hex::ToHex;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::util::merkleblock::MerkleBlock;
 use bitcoin::VarInt;
@@ -18,11 +20,10 @@ use crate::chain::{
 };
 use crate::config::Config;
 use crate::daemon::Daemon;
-use crate::inscription_entries::Entry;
 use crate::{errors::*, db_key};
 use crate::inscription_entries::index::{
     ID_TO_ENTRY, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS, INSCRIPTION_TXID_TO_TX,
-    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID, OUTPOINT_TO_SATRANGES, TXID_IS_INSCRIPTION,
+    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID, TXID_IS_INSCRIPTION,
 };
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
@@ -35,7 +36,6 @@ use crate::new_index::db::{DBFlush, DBRow, ReverseScanIterator, ScanIterator, DB
 use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
 
 use super::inscriptions_updater::InscriptionUpdater;
-use super::updater::Updater;
 
 const MIN_HISTORY_ITEMS_TO_CACHE: usize = 100;
 
@@ -193,6 +193,11 @@ impl From<&Config> for IndexerConfig {
     }
 }
 
+pub enum InscriptionParseBlock {
+    FromHeight(usize),
+    Hash(BlockHash),
+}
+
 pub struct ChainQuery {
     store: Arc<Store>, // TODO: should be used as read-only
     daemon: Arc<Daemon>,
@@ -219,6 +224,53 @@ impl Indexer {
 
     fn start_timer(&self, name: &str) -> HistogramTimer {
         self.duration.with_label_values(&[name]).start_timer()
+    }
+
+    pub fn get_block_height(&self, hash: BlockHash) -> Option<usize> {
+        self.store.indexed_headers.read().header_by_blockhash(&hash).map(|x| x.height())
+    }
+
+    pub fn index_inscription(&self, chain: Arc<ChainQuery>, block: InscriptionParseBlock) -> anyhow::Result<()>{
+        let mut inscription_updater = InscriptionUpdater::new(
+            0,
+            INSCRIPTION_ID_TO_SATPOINT,
+            INSCRIPTION_ID_TO_TXIDS,
+            INSCRIPTION_TXID_TO_TX,
+            PARTIAL_TXID_TO_TXIDS,
+            ID_TO_ENTRY,
+            0,
+            NUMBER_TO_ID,
+            OUTPOINT_TO_VALUE,
+            SAT_TO_INSCRIPTION_ID,
+            0,
+            self.store.outpoint_cache(),
+            self.store.inscription_db(),
+        )
+        .anyhow().unwrap();
+
+        let blocks = match block {
+            InscriptionParseBlock::FromHeight(height) => {
+                self.store.indexed_headers.read()
+                    .iter()
+                    .skip(height)
+                    .map(|x| *x.hash())
+                    .collect_vec()
+            },
+            InscriptionParseBlock::Hash(hash) => vec![hash,],
+        };
+
+        for b_hash in &blocks {
+            let Some(txs) = chain.get_block_txs(b_hash) else { continue;};
+
+            for tx in txs {
+                let txid = tx.txid();
+                if let (_, true ) = inscription_updater.index_transaction_inscriptions(self.store.clone(), &tx, txid, None).unwrap() {
+                    self.store.inscription_db().put(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), &[1])
+                }
+            }
+        }
+         
+        Ok(())
     }
 
     fn headers_to_add(&self, new_headers: &[HeaderEntry]) -> Vec<HeaderEntry> {
@@ -266,6 +318,10 @@ impl Indexer {
         let new_headers = self.get_new_headers(&daemon, &tip)?;
 
         let to_add = self.headers_to_add(&new_headers);
+        // let mut asd = to_add.iter().map(|x| x.height()).collect_vec();
+        // asd.sort_unstable();
+        // error!("{:#?}", asd);
+        
         debug!(
             "adding transactions from {} blocks using {:?}",
             to_add.len(),
@@ -304,6 +360,8 @@ impl Indexer {
 
         self.tip_metric.set(headers.len() as i64 - 1);
 
+        
+
         Ok(tip)
     }
 
@@ -317,35 +375,6 @@ impl Indexer {
         {
             let _timer = self.start_timer("add_write");
             self.store.txstore_db.write(rows, self.flush);
-        }
-
-        {
-
-            let mut inscription_updater = InscriptionUpdater::new(
-                22490,
-                INSCRIPTION_ID_TO_SATPOINT,
-                INSCRIPTION_ID_TO_TXIDS,
-                INSCRIPTION_TXID_TO_TX,
-                PARTIAL_TXID_TO_TXIDS,
-                ID_TO_ENTRY,
-                0,
-                NUMBER_TO_ID,
-                OUTPOINT_TO_VALUE,
-                SAT_TO_INSCRIPTION_ID,
-                0,
-                store.outpoint_cache(),
-                store.inscription_db(),
-            )
-            .anyhow().unwrap();
-
-            for b in blocks {
-                for tx in &b.block.txdata {
-                    let txid = tx.txid();
-                    if let (_, true ) = inscription_updater.index_transaction_inscriptions(store.clone(), tx, txid, None).unwrap() {
-                        store.inscription_db().put(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), &[1])
-                    }
-                }
-            }
         }
 
         self.store
@@ -1065,9 +1094,9 @@ fn add_blocks(
     //      B{blockhash} → {header}
     //      X{blockhash} → {txid1}...{txidN}
     //      M{blockhash} → {tx_count}{size}{weight}
-    store
-        .inscription_db()
-        .put(&db_key!(OUTPOINT_TO_SATRANGES,&OutPoint::null().store().unwrap()), &[]);
+    // store
+    //     .inscription_db()
+    //     .put(&db_key!(OUTPOINT_TO_SATRANGES,&OutPoint::null().store().unwrap()), &[]);
 
     // tx.open_table(OUTPOINT_TO_SAT_RANGES)?
     // .insert(&OutPoint::null().store(),)?;

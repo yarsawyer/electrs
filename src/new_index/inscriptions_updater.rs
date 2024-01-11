@@ -1,4 +1,5 @@
-use bitcoin::{consensus::Encodable, TxIn};
+use bitcoin::{consensus::Encodable, TxIn, hashes::hex::ToHex};
+use itertools::Itertools;
 use std::{
     collections::{HashMap, VecDeque},
     convert::TryInto, sync::Arc,
@@ -122,6 +123,11 @@ impl<'a> InscriptionUpdater<'a> {
         //     if tx_in.previous_output.is_null() {
         //         input_value += Height(self.height).subsidy();
         //     } else {
+        //         let prev_tx = store.txstore_db().get(&db_key!("T", &tx_in.previous_output.txid.into_inner())).anyhow()?;
+        //         let tx_buf = prev_tx;
+        //         let mut cursor = std::io::Cursor::new(tx_buf);
+        //         let tx = bitcoin::Transaction::consensus_decode(&mut cursor)?;
+        //         tx.input
         //         for bibas in
         //             InscriptionIndex::inscriptions_on_output(self.database, tx_in.previous_output)
         //                 .track_err()?
@@ -198,7 +204,7 @@ impl<'a> InscriptionUpdater<'a> {
                         &db_key!(self.partial_txid_to_txids, &txid.into_inner()),
                         txids_vec.as_slice(),
                     );
-                   
+
                     is_inscription = true;
                 }
 
