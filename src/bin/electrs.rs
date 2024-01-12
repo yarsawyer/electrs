@@ -172,22 +172,6 @@ fn run_server(config: Arc<Config>) -> Result<()> {
 }
 
 fn main() {
-    {
-        use tracing_subscriber::*;
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-        use electrs::util::log::{AndFilter, NotFilter};
-        //better_panic::install();
-        let indicatif_layer = tracing_indicatif::IndicatifLayer::new();
-        let fmt_layer_a = fmt::layer().with_writer(indicatif_layer.get_stderr_writer()).with_filter(AndFilter(EnvFilter::new("info"), NotFilter(EnvFilter::new("error"))));
-        let fmt_layer_b = fmt::layer().with_writer(indicatif_layer.get_stderr_writer()).pretty().with_thread_names(true).with_filter(EnvFilter::new("error"));
-        let filter_layer = EnvFilter::try_from_default_env()
-            .or_else(|_| EnvFilter::try_new("info,tokio=trace,runtime=trace"))
-            .unwrap();
-        let logger = registry().with(filter_layer).with(fmt_layer_b).with(fmt_layer_a).with(indicatif_layer);
-        logger.init();
-    }
-
     let config = Arc::new(Config::from_args());
     if let Err(e) = run_server(config) {
         error!("server failed: {}", e.display_chain());
