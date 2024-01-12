@@ -13,6 +13,8 @@ use crate::{errors::*, db_key};
 use crate::new_index::{ChainQuery, Mempool, ScriptStats, SpendingInput, Utxo};
 use crate::util::{is_spendable, BlockId, Bytes, TransactionStatus};
 
+use super::exchange_data::ExchangeData;
+
 
 const FEE_ESTIMATES_TTL: u64 = 60; // seconds
 
@@ -26,6 +28,7 @@ pub struct Query {
     mempool: Arc<parking_lot::RwLock<Mempool>>,
     daemon: Arc<Daemon>,
     config: Arc<Config>,
+    pub exchange_data: Arc<parking_lot::Mutex<ExchangeData>>,
     cached_estimates: parking_lot::RwLock<(HashMap<u16, f64>, Option<Instant>)>,
     cached_relayfee: parking_lot::RwLock<Option<f64>>,
 }
@@ -36,6 +39,7 @@ impl Query {
         mempool: Arc<parking_lot::RwLock<Mempool>>,
         daemon: Arc<Daemon>,
         config: Arc<Config>,
+        exchange_data: Arc<parking_lot::Mutex<ExchangeData>>,
     ) -> Self {
         Query {
             chain,
@@ -44,6 +48,7 @@ impl Query {
             config,
             cached_estimates: parking_lot::RwLock::new((HashMap::new(), None)),
             cached_relayfee: parking_lot::RwLock::new(None),
+            exchange_data,
         }
     }
 

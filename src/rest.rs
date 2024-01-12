@@ -1,8 +1,9 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
 use crate::errors;
+use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
-use crate::util::errors::UnwrapPrint;
+use crate::util::errors::{UnwrapPrint, AsAnyhow};
 use crate::util::{
     create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
     has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
@@ -21,6 +22,7 @@ use tokio::sync::oneshot;
 
 use hyperlocal::UnixServerExt;
 use std::fs;
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json;
@@ -448,6 +450,29 @@ async fn run_server(config: Arc<Config>, query: Arc<Query>, rx: oneshot::Receive
         }
     };
 
+    // run exchange fetcher
+    {
+        info!("Spawning exchange fetcher");
+        let query = Arc::clone(&query);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            loop {
+                info!("fetching balls");
+                let Some(price) = get_bells_price().await else {
+                    error!("Failed to get bell price. Using previous one");
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                    continue;
+                };
+                info!("Bells new price: {price} USD");
+                query.exchange_data.lock().bells_price = Some(price);
+                trace!("Bells price updated");
+
+                tokio::time::sleep(Duration::from_secs(300)).await;
+            }
+        });
+    }
+
+
     if let Err(e) = server {
         eprintln!("server error: {}", e);
     }
@@ -476,6 +501,7 @@ impl Handle {
     }
 }
 
+/// Handles all rest requests
 fn handle_request(
     method: Method,
     uri: hyper::Uri,
@@ -1143,6 +1169,20 @@ fn handle_request(
 
         (&Method::GET, Some(&"fee-estimates"), None, None, None, None) => {
             json_response(query.estimate_fee_map(), TTL_SHORT)
+        }
+
+        (&Method::GET, Some(&"coin"), Some(&"BELLS"), None, None, None) => {
+            #[derive(serde::Serialize)] struct J {
+                ticker: String,
+                price_usd: Option<f64>,
+            }
+
+            let bells_usd = query.exchange_data.lock().bells_price;
+
+            json_response(J {
+                ticker: "BELLS".to_owned(),
+                price_usd: bells_usd,
+            }, TTL_SHORT)
         }
 
         _ => Err(HttpError::not_found(format!(

@@ -16,7 +16,7 @@ use electrs::{
     electrum::RPC as ElectrumRPC,
     errors::*,
     metrics::Metrics,
-    new_index::{precache, ChainQuery, FetchFrom, Indexer, Mempool, Query, Store, schema::InscriptionParseBlock},
+    new_index::{precache, ChainQuery, FetchFrom, Indexer, Mempool, Query, Store, schema::InscriptionParseBlock, exchange_data::ExchangeData},
     rest,
     signal::Waiter,
 };
@@ -96,6 +96,10 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         asset_db
     });
 
+    let exchange_data = Arc::new(parking_lot::Mutex::new(ExchangeData {
+        bells_price: None,
+    }));
+
     let query = Arc::new(Query::new(
         Arc::clone(&chain),
         Arc::clone(&mempool),
@@ -103,6 +107,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         Arc::clone(&config),
         #[cfg(feature = "liquid")]
         asset_db,
+        exchange_data,
     ));
 
     // TODO: configuration for which servers to start
