@@ -7,6 +7,8 @@ pub mod bincode_util;
 pub mod electrum_merkle;
 pub mod fees;
 
+pub mod log;
+
 pub use self::block::{BlockHeaderMeta, BlockId, BlockMeta, BlockStatus, HeaderEntry, HeaderList};
 pub use self::fees::get_tx_fee;
 pub use self::script::{get_innerscripts, ScriptToAddr, ScriptToAsm};
