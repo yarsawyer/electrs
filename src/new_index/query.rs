@@ -92,9 +92,14 @@ impl Query {
             self.config.utxos_limit,
             super::db::DBFlush::Enable,
         )?;
+
         let mempool = self.mempool();
         utxos.retain(|utxo| !mempool.has_spend(&OutPoint::from(utxo)));
-        utxos.extend(mempool.utxo(scripthash)?);
+        
+        if !inscription {
+            utxos.extend(mempool.utxo(scripthash)?);
+        }
+     
         Ok(utxos)
     }
 

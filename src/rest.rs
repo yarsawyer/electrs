@@ -1,7 +1,10 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
-use crate::errors;
+use crate::inscription_entries::index::TXID_IS_INSCRIPTION;
+use crate::new_index::db::DBFlush;
+use crate::{errors, db_key};
 use crate::new_index::exchange_data::get_bells_price;
+use crate::inscription_entries::InscriptionId;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
 use crate::util::errors::{UnwrapPrint, AsAnyhow};
 use crate::util::{
@@ -14,10 +17,12 @@ use {bitcoin::consensus::encode, std::str::FromStr};
 
 use bitcoin::blockdata::opcodes;
 use bitcoin::hashes::hex::{FromHex, ToHex};
-use bitcoin::hashes::Error as HashError;
+use bitcoin::hashes::{Error as HashError, Hash};
 use hex::{self, FromHexError};
+
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Response, Server, StatusCode};
+
 use tokio::sync::oneshot;
 
 use hyperlocal::UnixServerExt;
@@ -304,6 +309,7 @@ struct UtxoValue {
     vout: u32,
     status: TransactionStatus,
     value: u64,
+    inscription_id: Option<InscriptionId>,
 }
 impl From<Utxo> for UtxoValue {
     fn from(utxo: Utxo) -> Self {
@@ -312,7 +318,7 @@ impl From<Utxo> for UtxoValue {
             vout: utxo.vout,
             status: TransactionStatus::from(utxo.confirmed),
             value: utxo.value,
-
+            inscription_id: utxo.inscription_id,
         }
     }
 }
@@ -415,6 +421,29 @@ async fn run_server(config: Arc<Config>, query: Arc<Query>, rx: oneshot::Receive
         }
     };
 
+    // run exchange fetcher
+    {
+        info!("Spawning exchange fetcher");
+        let query = Arc::clone(&query);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            loop {
+                info!("fetching balls");
+                let Some(price) = get_bells_price().await else {
+                    error!("Failed to get bell price. Using previous one");
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                    continue;
+                };
+                info!("Bells new price: {price} USD");
+                query.exchange_data.lock().bells_price = Some(price);
+                trace!("Bells price updated");
+
+                tokio::time::sleep(Duration::from_secs(300)).await;
+            }
+        });
+    }
+    
+
     let server = match socket_file {
         None => {
             info!("REST server running on {}", addr);
@@ -449,29 +478,6 @@ async fn run_server(config: Arc<Config>, query: Arc<Query>, rx: oneshot::Receive
                 .await
         }
     };
-
-    // run exchange fetcher
-    {
-        info!("Spawning exchange fetcher");
-        let query = Arc::clone(&query);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            loop {
-                info!("fetching balls");
-                let Some(price) = get_bells_price().await else {
-                    error!("Failed to get bell price. Using previous one");
-                    tokio::time::sleep(Duration::from_secs(300)).await;
-                    continue;
-                };
-                info!("Bells new price: {price} USD");
-                query.exchange_data.lock().bells_price = Some(price);
-                trace!("Bells price updated");
-
-                tokio::time::sleep(Duration::from_secs(300)).await;
-            }
-        });
-    }
-
 
     if let Err(e) = server {
         eprintln!("server error: {}", e);
@@ -755,7 +761,7 @@ fn handle_request(
                     after_txid.as_ref()
                 };
 
-                match query.chain().history(&script_hash[..], after_txid_ref, max_txs - txs.len(), false) {
+                match query.chain().history(&script_hash[..], after_txid_ref, max_txs - txs.len()) {
                     Ok(mempool_txs) => {
                         txs.extend(
                             mempool_txs
@@ -798,7 +804,7 @@ fn handle_request(
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_default_chain_txs_per_page);
 
-            let txs = match query.chain().history(&script_hash[..], last_seen_txid.as_ref(), max_txs, false) {
+            let txs = match query.chain().history(&script_hash[..], last_seen_txid.as_ref(), max_txs) {
                 Ok(txs) => {
                     txs.into_iter()
                         .map(|(tx, blockid)| (tx, Some(blockid)))
@@ -814,6 +820,16 @@ fn handle_request(
 
 
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
+        }
+        // todo update md
+        (&Method::GET, Some(&"ord"), Some(&"txid"), Some(txid), None, None) => {
+
+            let txid = Txid::from_str(txid).unwrap();
+            let genesis = query.chain().store().inscription_db().get(&db_key!(TXID_IS_INSCRIPTION,&txid.into_inner())).map(|x|
+                Txid::from_slice(&x)
+            ).unwrap().unwrap();
+            
+            http_message(StatusCode::OK, genesis.to_hex(), TTL_LONG)
         }
         // todo update md
         (
@@ -833,28 +849,16 @@ fn handle_request(
             last_seen_txid,
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
-            let last_seen_txid = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok());
-            let max_txs = query_params
-                .get("max_txs")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(config.rest_default_chain_txs_per_page);
+            let last_seen_txid: Option<Txid> = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok());
 
-            let txs = match query.chain().history(&script_hash[..], last_seen_txid.as_ref(), max_txs, true) {
-                Ok(txs) => {
-                    txs.into_iter()
-                        .map(|(tx, blockid)| (tx, Some(blockid)))
-                        .collect()
-                }
-                Err(e) => {
-                    return Err(HttpError(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        format!("{e:?}"),
-                    ));
-                }
-            };
-
-
-            json_response(prepare_txs(txs, query, config), TTL_SHORT)
+            
+            let utxos: Vec<UtxoValue> = query.chain()
+                .ords(&script_hash[..], last_seen_txid, 500, DBFlush::Enable)?
+                .into_iter()
+                .map(UtxoValue::from)
+                .collect();
+            // XXX paging?
+            json_response(utxos, TTL_SHORT)
         }
         (
             &Method::GET,
@@ -900,16 +904,16 @@ fn handle_request(
             &Method::GET,
             Some(script_type @ &"address"),
             Some(script_str),
-            Some(&"ord"),
-            Some(&"utxo"),
+            Some(&"ords"),
+            None,
             None,
         )
         | (
             &Method::GET,
             Some(script_type @ &"scripthash"),
             Some(script_str),
-            Some(&"ord"),
-            Some(&"utxo"),
+            Some(&"ords"),
+            None,
             None,
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;

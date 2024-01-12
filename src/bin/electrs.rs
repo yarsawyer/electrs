@@ -64,6 +64,11 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &config,
         &metrics,
     );
+
+    let last_indexed_block = store.txstore_db().get(b"t").map(|x|
+        bitcoin::consensus::encode::deserialize(&x).expect("invalid chain tip in `t`")
+    );
+
     let mut tip = indexer.update(&daemon, Arc::clone(&store))?;
 
     let chain = Arc::new(ChainQuery::new(
@@ -73,16 +78,19 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &metrics,
     ));
   
-    //todo: handle this .unwrap() stupid bitch
-    let Some(raw_hash) = store.txstore_db().get(b"t") else {
-        panic!("PO PIZDE VSE POSHLO");
+ //todo: handle this .unwrap() stupid bitch
+    let block_from = if let Some(hash) = last_indexed_block {
+        //let hash = bitcoin::consensus::encode::deserialize(&raw_hash).expect("invalid chain tip in `t`");
+        store.get_block_height(hash).unwrap_or(config.first_inscription_block)
+    }
+    else {
+        config.first_inscription_block
     };
-    let tip_hash = bitcoin::consensus::encode::deserialize(&raw_hash).expect("invalid chain tip in `t`");
-    let block_from = indexer.get_block_height(tip_hash).unwrap_or(config.first_inscription_block);
+
 
     indexer.index_inscription(
         chain.clone(),
-        InscriptionParseBlock::FromHeight(block_from)
+        InscriptionParseBlock::FromHeight(block_from),
     ).unwrap();
 
     let mempool = Arc::new(parking_lot::RwLock::new(Mempool::new(
