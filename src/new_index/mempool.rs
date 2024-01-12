@@ -195,6 +195,7 @@ impl Mempool {
                 vout: info.vout as u32,
                 value: info.value,
                 confirmed: None,
+                inscription_id: None,
             };
 
             if !self.has_spend(&OutPoint::from(&v)) {

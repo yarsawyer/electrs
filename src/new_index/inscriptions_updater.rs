@@ -10,7 +10,7 @@ use crate::{
     inscription_entries::{
         entry::{Entry, InscriptionEntry},
         height::Height,
-        index::{InscriptionIndex, NUMBER_TO_ID, INSCRIPTION_ID_TO_TXIDS},
+        index::{InscriptionIndex, NUMBER_TO_ID, INSCRIPTION_ID_TO_TXIDS, TXID_IS_INSCRIPTION},
         inscription::Inscription,
         inscription::ParsedInscription,
         inscription_id::InscriptionId,
@@ -158,118 +158,95 @@ impl<'a> InscriptionUpdater<'a> {
         //     }
         // }
 
-        if true {
-            let previous_txid = tx.input[0].previous_output.txid;
-            let previous_txid_bytes: [u8; 32] = previous_txid.into_inner();
-            let mut txids_vec = vec![];
+        let previous_txid = tx.input[0].previous_output.txid;
+        let previous_txid_bytes: [u8; 32] = previous_txid.into_inner();
+        let mut txids_vec = vec![];
 
-            let txs = match self
-                .database
-                .get(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes))
-            {
-                Some(partial_txids) => {
-                    let txids = partial_txids;
-                    let mut txs = vec![];
-                    txids_vec = txids.to_vec();
-                    for i in 0..txids.len() / 32 {
-                        let txid = &txids[i * 32..i * 32 + 32];
-                       
-                        let tx_result = store.txstore_db().get(&db_key!("T", txid)).anyhow()?;
-                        let tx_buf = tx_result;
-                        let mut cursor = std::io::Cursor::new(tx_buf);
-                        let tx = bitcoin::Transaction::consensus_decode(&mut cursor)?;
-                        txs.push(tx);
-                    }
-                    txs.push(tx.clone());
-                    txs
+        let txs = match self
+            .database
+            .get(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes))
+        {
+            Some(partial_txids) => {
+                let txids = partial_txids;
+                let mut txs = vec![];
+                txids_vec = txids.to_vec();
+                for i in 0..txids.len() / 32 {
+                    let txid = &txids[i * 32..i * 32 + 32];
+                    
+                    let tx_result = store.txstore_db().get(&db_key!("T", txid)).anyhow()?;
+                    let tx_buf = tx_result;
+                    let mut cursor = std::io::Cursor::new(tx_buf);
+                    let tx = bitcoin::Transaction::consensus_decode(&mut cursor)?;
+                    
+                    txs.push(tx);
                 }
-                None => {
-                    vec![tx.clone()]
-                }
-            };
-
-            match Inscription::from_transactions(txs.clone()) {
-                ParsedInscription::None => {
-                    let prev_tx = tx.input.first().anyhow_as("No inputs :(")?.previous_output.txid;
-                    let prev_inscription_id = InscriptionId {
-                        txid: prev_tx,
-                        index: 0,
-                    }.store().anyhow_as("Failed store prev ord id")?;
-                   
-                    if let Some(shit) = store.inscription_db().remove(&db_key!(INSCRIPTION_ID_TO_TXIDS, &prev_inscription_id)) {
-                        info!("Ord was move from:{:?} to:{:?}", prev_tx.to_hex(), txid.to_hex() );
-                        let new_inscription_id = InscriptionId {
-                            txid,
-                            index: 0,
-                        }.store().anyhow_as("Failed store new ord id")?;
-
-                        store.inscription_db().put(&db_key!(INSCRIPTION_ID_TO_TXIDS,&new_inscription_id), &shit);
-                    };
-                    // todo: clean up db
-
-                }
-
-                ParsedInscription::Partial => {
-                    let mut txid_vec = txid.into_inner().to_vec();
-                    txids_vec.append(&mut txid_vec);
-
-                    self.database
-                        .remove(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes));
-
-                    self.database.put(
-                        &db_key!(self.partial_txid_to_txids, &txid.into_inner()),
-                        txids_vec.as_slice(),
-                    );
-
-                    is_inscription = true;
-                }
-
-                ParsedInscription::Complete(_inscription) => {
-                    self.database
-                        .remove(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes));
-
-                    let mut txid_vec = txid.into_inner().to_vec();
-                    txids_vec.append(&mut txid_vec);
-
-                    let mut inscription_id = [0_u8; 36];
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            txids_vec.as_ptr(),
-                            inscription_id.as_mut_ptr(),
-                            32,
-                        )
-                    }
-
-                    let og_inscription_id = InscriptionId {
-                        txid: Txid::from_slice(&txids_vec[0..32]).track_err()?,
-                        index: 0,
-                    };
-                    store.inscription_db().put(&db_key!(INSCRIPTION_ID_TO_TXIDS,&og_inscription_id.store().anyhow()?), &txids_vec);
-
-                    inscriptions.push(Flotsam {
-                        inscription_id: og_inscription_id,
-                        offset: 0,
-                        origin: Origin::New(
-                            0
-                            //input_value - tx.output.iter().map(|txout| txout.value).sum::<u64>(),
-                        ),
-                    });
-                    is_inscription = true;
-                }
+                txs.push(tx.clone());
+                txs
+            }
+            None => {
+                vec![tx.clone()]
             }
         };
 
-        // let is_coinbase = tx
-        //     .input
-        //     .first()
-        //     .map(|tx_in| tx_in.previous_output.is_null())
-        //     .unwrap_or_default();
+        match Inscription::from_transactions(txs.clone()) {
+            ParsedInscription::None => {
+                let prev_tx = tx.input.first().anyhow_as("No inputs :(")?.previous_output.txid;
+                
+                if let Some(shit) = store.inscription_db().remove(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.into_inner())) {
+                    //info!("Ord was move from:{:?} to:{:?}", prev_tx.to_hex(), txid.to_hex() );
+                    store.inscription_db().put(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.into_inner()), &shit)
+                };
+            }
 
-        // if is_coinbase {
-        //     inscriptions.append(&mut self.flotsam);
-        // }
+            ParsedInscription::Partial => {
+                let mut txid_vec = txid.into_inner().to_vec();
+                txids_vec.append(&mut txid_vec);
 
-        //inscriptions.sort_by_key(|flotsam| flotsam.offset);
+                self.database
+                    .remove(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes));
+
+                self.database.put(
+                    &db_key!(self.partial_txid_to_txids, &txid.into_inner()),
+                    txids_vec.as_slice(),
+                );
+
+                is_inscription = true;
+            }
+
+            ParsedInscription::Complete(_inscription) => {
+                self.database
+                    .remove(&db_key!(self.partial_txid_to_txids, &previous_txid_bytes));
+
+                let mut txid_vec = txid.into_inner().to_vec();
+                txids_vec.append(&mut txid_vec);
+
+                let mut inscription_id = [0_u8; 36];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        txids_vec.as_ptr(),
+                        inscription_id.as_mut_ptr(),
+                        32,
+                    )
+                }
+
+                let og_inscription_id = InscriptionId {
+                    txid: Txid::from_slice(&txids_vec[0..32]).track_err()?,
+                    index: 0,
+                };
+                store.inscription_db().put(&db_key!(INSCRIPTION_ID_TO_TXIDS,&og_inscription_id.store().anyhow()?), &txids_vec);
+
+                inscriptions.push(Flotsam {
+                    inscription_id: og_inscription_id,
+                    offset: 0,
+                    origin: Origin::New(
+                        0
+                        //input_value - tx.output.iter().map(|txout| txout.value).sum::<u64>(),
+                    ),
+                });
+                is_inscription = true;
+            }
+        }
+
         
         let clone_govna = inscriptions.clone().into_iter().peekable();
         let mut inscriptions = inscriptions.into_iter().peekable();
@@ -277,36 +254,13 @@ impl<'a> InscriptionUpdater<'a> {
         let mut output_value = 0;
         for (vout, tx_out) in tx.output.iter().enumerate() {
             output_value += tx_out.value;
+        }
 
-            // while let Some(flotsam) = inscriptions.peek() {
-            //     if flotsam.offset >= end {
-            //         break;
-            //     }
-
-            //     let new_satpoint = SatPoint {
-            //         outpoint: OutPoint {
-            //             txid,
-            //             vout: vout.try_into().track_err()?,
-            //         },
-            //         offset: flotsam.offset - output_value,
-            //     };
-
-            //     self.update_inscription_location(
-            //         input_sat_ranges,
-            //         inscriptions.next().track_err()?,
-            //         new_satpoint,
-            //     )?;
-            // }
-
-            // output_value = end;
-
-            // self.value_cache.write().insert(
-            //     OutPoint {
-            //         vout: vout.try_into().track_err()?,
-            //         txid,
-            //     },
-            //     tx_out.value,
-            // );
+        if is_inscription {
+            store.inscription_db().put(
+                &db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), 
+                &txs.first().anyhow_as("BIG COCKS")?.txid().into_inner()
+            );
         }
 
         if false {
