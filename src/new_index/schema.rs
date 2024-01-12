@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use bitcoin::consensus::encode::{deserialize, serialize};
+use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
@@ -259,6 +260,18 @@ impl Indexer {
             InscriptionParseBlock::Hash(hash) => vec![hash,],
         };
 
+        let mut progress_span = None;
+        let mut progress_span_ = None;
+        if blocks.len() > 3 {
+            let span = tracing::info_span!("index_blocks");
+            span.pb_set_style(&indicatif::ProgressStyle::with_template("{prefix:.bold} <{bar}> {msg}").unwrap().progress_chars("█▉▊▋▌▍▎▏  "));
+            span.pb_set_length(blocks.len() as u64);
+            span.pb_set_message("indexing blocks");
+            
+            progress_span = Some(span);
+            progress_span_ = Some(progress_span.as_ref().unwrap().enter());
+        }
+
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else { continue;};
 
@@ -268,7 +281,12 @@ impl Indexer {
                     self.store.inscription_db().put(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), &[1])
                 }
             }
+
+            tracing::Span::current().pb_inc(1);
         }
+
+        drop(progress_span_);
+        drop(progress_span);
          
         Ok(())
     }

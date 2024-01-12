@@ -8,8 +8,11 @@ extern crate clap;
 extern crate arrayref;
 #[macro_use]
 extern crate error_chain;
+// #[macro_use]
+// extern crate log;
 #[macro_use]
-extern crate log;
+extern crate tracing;
+
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
