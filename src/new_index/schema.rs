@@ -29,7 +29,7 @@ use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricO
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
-    BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
+    BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr, BoolThen,
 };
 
 use crate::new_index::db::{DBFlush, DBRow, ReverseScanIterator, ScanIterator, DB};
@@ -571,9 +571,10 @@ impl ChainQuery {
         scripthash: &[u8],
         last_seen_txid: Option<&Txid>,
         limit: usize,
+        select_inscriptions: bool,
     ) -> Result<Vec<(Transaction, BlockId)>> {
         // scripthash lookup
-        self._history(b'H', scripthash, last_seen_txid, limit)
+        self._history(b'H', scripthash, last_seen_txid, limit, select_inscriptions)
     }
 
     pub fn history_txids_iter<'a>(&'a self, scripthash: &[u8]) -> impl Iterator<Item = Txid> + 'a {
@@ -588,6 +589,7 @@ impl ChainQuery {
         hash: &[u8],
         last_seen_txid: Option<&Txid>,
         limit: usize,
+        select_inscriptions: bool,
     ) -> Result<Vec<(Transaction, BlockId)>> {
         let _timer_scan = self.start_timer("history");
         let txs_conf = self
@@ -604,7 +606,11 @@ impl ChainQuery {
                 Some(_) => 1, // skip the last_seen_txid itself
                 None => 0,
             })
-            .filter_map(|txid| self.tx_confirming_block(&txid).map(|b| (txid, b)))
+            .filter_map(|txid| {
+                let is_inscription = self.store.inscription_db().get(&db_key!(TXID_IS_INSCRIPTION, &txid)).is_some();
+                (is_inscription == select_inscriptions)
+                    .and_then(||self.tx_confirming_block(&txid).map(|b| (txid, b)))
+            })
             .take(limit)
             .collect::<Vec<(Txid, BlockId)>>();
 
