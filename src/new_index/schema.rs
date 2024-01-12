@@ -272,6 +272,7 @@ impl Indexer {
             progress_span_ = Some(progress_span.as_ref().unwrap().enter());
         }
 
+        let mut i = 0;
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else { continue;};
 
@@ -282,7 +283,11 @@ impl Indexer {
                 }
             }
 
-            tracing::Span::current().pb_inc(1);
+            i += 1;
+            if progress_span.is_some() {
+                tracing::Span::current().pb_inc(1);
+                progress_span.as_ref().unwrap().pb_set_message(&format!("{i}/{} indexing blocks", blocks.len()));
+            }
         }
 
         drop(progress_span_);
