@@ -29,7 +29,7 @@ lazy_static! {
 #[derive(Debug, Clone)]
 pub struct Config {
     // See below for the documentation of each field:
-    pub log: stderrlog::StdErrLog,
+    //pub log: stderrlog::StdErrLog,
     pub network_type: Network,
     pub db_path: PathBuf,
     pub daemon_dir: PathBuf,
@@ -362,17 +362,42 @@ impl Config {
             .value_of("electrum_public_hosts")
             .map(|s| serde_json::from_str(s).expect("invalid --electrum-public-hosts"));
 
-        let mut log = stderrlog::new();
-        log.verbosity(m.occurrences_of("verbosity") as usize);
-        log.timestamp(if m.is_present("timestamp") {
-            stderrlog::Timestamp::Millisecond
-        } else {
-            stderrlog::Timestamp::Off
-        });
-        log.init().expect("logging initialization failed");
+
+        {
+            use tracing_subscriber::*;
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+            use crate::util::log::{AndFilter, NotFilter};
+            //better_panic::install();
+            let indicatif_layer = tracing_indicatif::IndicatifLayer::new();
+            let verbosity = match m.occurrences_of("verbosity") {
+                0 => "error",
+                1 => "warn",
+                2 => "info",
+                3 => "debug",
+                _ => "trace",
+            };
+            let fmt_layer_a = fmt::layer().with_writer(indicatif_layer.get_stderr_writer()).with_filter(AndFilter(EnvFilter::new(verbosity), NotFilter(EnvFilter::new("error"))));
+            let fmt_layer_b = fmt::layer().with_writer(indicatif_layer.get_stderr_writer()).pretty().with_thread_names(true).with_filter(EnvFilter::new("error"));
+            // let filter_layer = EnvFilter::try_from_default_env()
+            //     .or_else(|_| EnvFilter::try_new("info,tokio=trace,runtime=trace"))
+            //     .unwrap();
+            let logger = registry().with(fmt_layer_b).with(fmt_layer_a).with(indicatif_layer);
+            
+            logger.init();
+        }
+
+        // let mut log = stderrlog::new();
+        // log.verbosity(m.occurrences_of("verbosity") as usize);
+        // log.timestamp(if m.is_present("timestamp") {
+        //     stderrlog::Timestamp::Millisecond
+        // } else {
+        //     stderrlog::Timestamp::Off
+        // });
+        // log.init().expect("logging initialization failed");
         let config = Config {
             first_inscription_block,
-            log,
+            //log,
             network_type,
             db_path,
             daemon_dir,
