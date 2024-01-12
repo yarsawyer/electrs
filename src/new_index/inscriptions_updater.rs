@@ -190,7 +190,23 @@ impl<'a> InscriptionUpdater<'a> {
 
             match Inscription::from_transactions(txs.clone()) {
                 ParsedInscription::None => {
+                    let prev_tx = tx.input.first().anyhow_as("No inputs :(")?.previous_output.txid;
+                    let prev_inscription_id = InscriptionId {
+                        txid: prev_tx,
+                        index: 0,
+                    }.store().anyhow_as("Failed store prev ord id")?;
+                   
+                    if let Some(shit) = store.inscription_db().remove(&db_key!(INSCRIPTION_ID_TO_TXIDS, &prev_inscription_id)) {
+                        info!("Ord was move from:{:?} to:{:?}", prev_tx.to_hex(), txid.to_hex() );
+                        let new_inscription_id = InscriptionId {
+                            txid,
+                            index: 0,
+                        }.store().anyhow_as("Failed store new ord id")?;
+
+                        store.inscription_db().put(&db_key!(INSCRIPTION_ID_TO_TXIDS,&new_inscription_id), &shit);
+                    };
                     // todo: clean up db
+
                 }
 
                 ParsedInscription::Partial => {
