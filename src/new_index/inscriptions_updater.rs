@@ -1,8 +1,9 @@
-use bitcoin::{consensus::Encodable, TxIn, hashes::hex::ToHex};
+use bitcoin::{consensus::Encodable, hashes::hex::ToHex, TxIn};
 use itertools::Itertools;
 use std::{
     collections::{HashMap, VecDeque},
-    convert::TryInto, sync::Arc,
+    convert::TryInto,
+    sync::Arc,
 };
 
 use crate::{
@@ -10,7 +11,10 @@ use crate::{
     inscription_entries::{
         entry::{Entry, InscriptionEntry},
         height::Height,
-        index::{InscriptionIndex, NUMBER_TO_ID, INSCRIPTION_ID_TO_TXIDS, TXID_IS_INSCRIPTION},
+        index::{
+            InscriptionIndex, INSCRIPTION_ID_TO_META, INSCRIPTION_ID_TO_TXIDS, NUMBER_TO_ID,
+            TXID_IS_INSCRIPTION,
+        },
         inscription::Inscription,
         inscription::ParsedInscription,
         inscription_id::InscriptionId,
@@ -22,7 +26,7 @@ use anyhow::{anyhow, Result};
 use bitcoin::consensus::Decodable;
 use bitcoin::{hashes::Hash, OutPoint, Transaction, Txid};
 
-use super::{DB, Store};
+use super::{Store, DB};
 
 #[derive(Clone)]
 pub(super) struct Flotsam {
@@ -104,7 +108,7 @@ impl<'a> InscriptionUpdater<'a> {
         })
     }
 
-    pub(crate) fn index_transaction_inscriptions(
+    pub(crate) fn index_transaction_nscriptions(
         &mut self,
         store: Arc<Store>,
         tx: &Transaction,
@@ -172,12 +176,12 @@ impl<'a> InscriptionUpdater<'a> {
                 txids_vec = txids.to_vec();
                 for i in 0..txids.len() / 32 {
                     let txid = &txids[i * 32..i * 32 + 32];
-                    
+
                     let tx_result = store.txstore_db().get(&db_key!("T", txid)).anyhow()?;
                     let tx_buf = tx_result;
                     let mut cursor = std::io::Cursor::new(tx_buf);
                     let tx = bitcoin::Transaction::consensus_decode(&mut cursor)?;
-                    
+
                     txs.push(tx);
                 }
                 txs.push(tx.clone());
@@ -190,11 +194,21 @@ impl<'a> InscriptionUpdater<'a> {
 
         match Inscription::from_transactions(txs.clone()) {
             ParsedInscription::None => {
-                let prev_tx = tx.input.first().anyhow_as("No inputs :(")?.previous_output.txid;
-                
-                if let Some(shit) = store.inscription_db().remove(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.into_inner())) {
+                let prev_tx = tx
+                    .input
+                    .first()
+                    .anyhow_as("No inputs :(")?
+                    .previous_output
+                    .txid;
+
+                if let Some(shit) = store
+                    .inscription_db()
+                    .remove(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.into_inner()))
+                {
                     //info!("Ord was move from:{:?} to:{:?}", prev_tx.to_hex(), txid.to_hex() );
-                    store.inscription_db().put(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.into_inner()), &shit)
+                    store
+                        .inscription_db()
+                        .put(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.into_inner()), &shit)
                 };
             }
 
@@ -209,8 +223,6 @@ impl<'a> InscriptionUpdater<'a> {
                     &db_key!(self.partial_txid_to_txids, &txid.into_inner()),
                     txids_vec.as_slice(),
                 );
-
-                is_inscription = true;
             }
 
             ParsedInscription::Complete(_inscription) => {
@@ -233,21 +245,31 @@ impl<'a> InscriptionUpdater<'a> {
                     txid: Txid::from_slice(&txids_vec[0..32]).track_err()?,
                     index: 0,
                 };
-                store.inscription_db().put(&db_key!(INSCRIPTION_ID_TO_TXIDS,&og_inscription_id.store().anyhow()?), &txids_vec);
+                store.inscription_db().put(
+                    &db_key!(
+                        INSCRIPTION_ID_TO_TXIDS,
+                        &og_inscription_id.store().anyhow()?
+                    ),
+                    &txids_vec,
+                );
+                store.inscription_db().put(
+                    &db_key!(INSCRIPTION_ID_TO_META, &og_inscription_id.store().anyhow()?),
+                    &_inscription
+                        .into_body()
+                        .anyhow_as("Failed to move inscription struct into body")?,
+                );
 
                 inscriptions.push(Flotsam {
                     inscription_id: og_inscription_id,
                     offset: 0,
                     origin: Origin::New(
-                        0
-                        //input_value - tx.output.iter().map(|txout| txout.value).sum::<u64>(),
+                        0, //input_value - tx.output.iter().map(|txout| txout.value).sum::<u64>(),
                     ),
                 });
                 is_inscription = true;
             }
         }
 
-        
         let clone_govna = inscriptions.clone().into_iter().peekable();
         let mut inscriptions = inscriptions.into_iter().peekable();
 
@@ -258,8 +280,8 @@ impl<'a> InscriptionUpdater<'a> {
 
         if is_inscription {
             store.inscription_db().put(
-                &db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), 
-                &txs.first().anyhow_as("BIG COCKS")?.txid().into_inner()
+                &db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()),
+                &txs.first().anyhow_as("BIG COCKS")?.txid().into_inner(),
             );
         }
 
@@ -272,10 +294,7 @@ impl<'a> InscriptionUpdater<'a> {
                 self.update_inscription_location(input_sat_ranges, flotsam, new_satpoint)?;
             }
 
-            Ok((
-                self.reward - output_value,
-                is_inscription,
-            ))
+            Ok((self.reward - output_value, is_inscription))
         } else {
             // let reward = self.reward;
             // self.flotsam.extend(inscriptions.map(|flotsam| Flotsam {
@@ -283,10 +302,7 @@ impl<'a> InscriptionUpdater<'a> {
             //     ..flotsam
             // }));
             // self.reward += input_value - output_value;
-            Ok((
-                0,
-                is_inscription,
-            ))
+            Ok((0, is_inscription))
         }
     }
 
