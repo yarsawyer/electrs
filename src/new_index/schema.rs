@@ -23,11 +23,12 @@ use crate::chain::{
 use crate::config::Config;
 use crate::daemon::Daemon;
 use crate::inscription_entries::index::{
-    ID_TO_ENTRY, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS, INSCRIPTION_TXID_TO_TX,
-    NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS, SAT_TO_INSCRIPTION_ID,
-    TXID_IS_INSCRIPTION,
+    ID_TO_ENTRY, INSCRIPTION_ID_TO_META, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS,
+    INSCRIPTION_TXID_TO_TX, NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS,
+    SAT_TO_INSCRIPTION_ID, TXID_IS_INSCRIPTION,
 };
-use crate::inscription_entries::InscriptionId;
+use crate::inscription_entries::inscription::InscriptionMeta;
+use crate::inscription_entries::{inscription, Entry, InscriptionId};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
@@ -147,6 +148,10 @@ pub struct Utxo {
     pub vout: u32,
     pub confirmed: Option<BlockId>,
     pub value: Value,
+    pub content_type: Option<String>,
+    pub content_length: Option<usize>,
+    pub outpoint: Option<Txid>,
+    pub genesis: Option<Txid>,
 }
 
 impl From<&Utxo> for OutPoint {
@@ -729,6 +734,10 @@ impl ChainQuery {
                     value,
                     confirmed: Some(blockid),
                     inscription_id,
+                    content_length: None,
+                    content_type: None,
+                    genesis: None,
+                    outpoint: None,
 
                     #[cfg(feature = "liquid")]
                     asset: txo.asset,
@@ -862,12 +871,35 @@ impl ChainQuery {
                 #[cfg(feature = "liquid")]
                 let txo = self.lookup_txo(&outpoint).expect("missing utxo");
 
+                let mut inscription_meta: Option<InscriptionMeta> = None;
+
+                if let Some(inscription_id) = inscription_id {
+                    let inscription_raw = self.store().inscription_db().get(&db_key!(
+                        INSCRIPTION_ID_TO_META,
+                        &inscription_id
+                            .store()
+                            .expect("schema.rs:873 - Failed to store inscription_id")
+                    ));
+                    if let Some(inscription_raw) = inscription_raw {
+                        inscription_meta = Some(
+                            InscriptionMeta::from_bytes(&inscription_raw)
+                                .expect("Failed to decode inscription meta"),
+                        );
+                    }
+                }
+
                 Utxo {
                     txid: outpoint.txid,
                     vout: outpoint.vout,
                     value,
                     confirmed: Some(blockid),
                     inscription_id,
+                    content_length: inscription_meta.as_ref().map(|meta| meta.content_length),
+                    content_type: inscription_meta
+                        .as_ref()
+                        .map(|meta| meta.content_type.clone()),
+                    outpoint: inscription_meta.as_ref().map(|meta| meta.outpoint),
+                    genesis: inscription_meta.as_ref().map(|meta| meta.genesis),
 
                     #[cfg(feature = "liquid")]
                     asset: txo.asset,

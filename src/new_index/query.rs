@@ -9,12 +9,11 @@ use crate::chain::{Network, OutPoint, Transaction, TxOut, Txid};
 use crate::config::Config;
 use crate::daemon::Daemon;
 use crate::inscription_entries::index::TXID_IS_INSCRIPTION;
-use crate::{errors::*, db_key};
 use crate::new_index::{ChainQuery, Mempool, ScriptStats, SpendingInput, Utxo};
 use crate::util::{is_spendable, BlockId, Bytes, TransactionStatus};
+use crate::{db_key, errors::*};
 
 use super::exchange_data::ExchangeData;
-
 
 const FEE_ESTIMATES_TTL: u64 = 60; // seconds
 
@@ -72,11 +71,7 @@ impl Query {
         let txid = self.daemon.broadcast_raw(txhex)?;
         // The important part is whether we succeeded in broadcasting.
         // Ignore errors in adding to the cache and show an internal warning.
-        if let Err(e) = self
-            .mempool
-                .write()
-                .add_by_txid(&self.daemon, &txid)
-        {
+        if let Err(e) = self.mempool.write().add_by_txid(&self.daemon, &txid) {
             warn!(
                 "broadcast_raw of {txid} succeeded to broadcast \
                 but failed to add to mempool-electrs Mempool cache: {e}"
@@ -182,11 +177,7 @@ impl Query {
         }
 
         self.update_fee_estimates();
-        self.cached_estimates
-            .read()
-            .0
-            .get(&conf_target)
-            .copied()
+        self.cached_estimates.read().0.get(&conf_target).copied()
     }
 
     pub fn estimate_fee_map(&self) -> HashMap<u16, f64> {
@@ -220,5 +211,4 @@ impl Query {
         self.cached_relayfee.write().replace(relayfee);
         Ok(relayfee)
     }
-
 }
