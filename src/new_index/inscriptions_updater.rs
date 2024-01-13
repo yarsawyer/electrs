@@ -108,7 +108,7 @@ impl<'a> InscriptionUpdater<'a> {
         })
     }
 
-    pub(crate) fn index_transaction_nscriptions(
+    pub(crate) fn index_transaction_inscriptions(
         &mut self,
         store: Arc<Store>,
         tx: &Transaction,
