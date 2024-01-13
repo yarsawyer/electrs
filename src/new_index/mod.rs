@@ -1,11 +1,10 @@
 pub mod db;
+pub mod exchange_data;
 mod fetch;
 mod mempool;
 pub mod precache;
 mod query;
 pub mod schema;
-pub mod updater;
-pub mod exchange_data;
 
 pub use self::db::{DBRow, DB};
 pub use self::fetch::{BlockEntry, FetchFrom};

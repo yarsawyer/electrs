@@ -5,12 +5,10 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use stderrlog;
 
 use crate::chain::Network;
 use crate::daemon::CookieGetter;
 use crate::errors::*;
-
 
 pub(crate) const APP_NAME: &str = "mempool-electrs";
 pub(crate) const ELECTRS_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -57,7 +55,6 @@ pub struct Config {
     pub rest_default_chain_txs_per_page: usize,
     pub rest_default_max_mempool_txs: usize,
     pub first_inscription_block: usize,
-
 
     #[cfg(feature = "electrum-discovery")]
     pub electrum_public_hosts: Option<crate::electrum::ServerHosts>,
@@ -200,7 +197,7 @@ impl Config {
                 Arg::with_name("utxos_limit")
                     .long("utxos-limit")
                     .help("Maximum number of utxos to process per address. Lookups for addresses with more utxos will fail. Applies to the Electrum and HTTP APIs.")
-                    .default_value("500")
+                    .default_value("50")
             )
             .arg(
                 Arg::with_name("mempool_backlog_stats_ttl")
@@ -289,8 +286,11 @@ impl Config {
         let db_dir = Path::new(m.value_of("db_dir").unwrap_or("./db"));
         let db_path = db_dir.join(network_name);
 
-        let first_inscription_block: usize = m.value_of("first_inscription_block").unwrap_or("22490").parse().unwrap();
-
+        let first_inscription_block: usize = m
+            .value_of("first_inscription_block")
+            .unwrap_or("22490")
+            .parse()
+            .unwrap();
 
         let default_daemon_port = match network_type {
             Network::Bellscoin => 9982,
@@ -299,7 +299,6 @@ impl Config {
         let default_electrum_port = match network_type {
             Network::Bellscoin => 50001,
             Network::Testnet => 60001,
-
         };
 
         let default_http_port = match network_type {
@@ -362,12 +361,11 @@ impl Config {
             .value_of("electrum_public_hosts")
             .map(|s| serde_json::from_str(s).expect("invalid --electrum-public-hosts"));
 
-
         {
-            use tracing_subscriber::*;
+            use crate::util::log::{AndFilter, NotFilter};
             use tracing_subscriber::layer::SubscriberExt;
             use tracing_subscriber::util::SubscriberInitExt;
-            use crate::util::log::{AndFilter, NotFilter};
+            use tracing_subscriber::*;
             //better_panic::install();
             let indicatif_layer = tracing_indicatif::IndicatifLayer::new();
             let verbosity = match m.occurrences_of("verbosity") {
@@ -377,13 +375,25 @@ impl Config {
                 3 => "debug",
                 _ => "trace",
             };
-            let fmt_layer_a = fmt::layer().with_writer(indicatif_layer.get_stderr_writer()).with_filter(AndFilter(EnvFilter::new(verbosity), NotFilter(EnvFilter::new("error"))));
-            let fmt_layer_b = fmt::layer().with_writer(indicatif_layer.get_stderr_writer()).pretty().with_thread_names(true).with_filter(EnvFilter::new("error"));
+            let fmt_layer_a = fmt::layer()
+                .with_writer(indicatif_layer.get_stderr_writer())
+                .with_filter(AndFilter(
+                    EnvFilter::new(verbosity),
+                    NotFilter(EnvFilter::new("error")),
+                ));
+            let fmt_layer_b = fmt::layer()
+                .with_writer(indicatif_layer.get_stderr_writer())
+                .pretty()
+                .with_thread_names(true)
+                .with_filter(EnvFilter::new("error"));
             // let filter_layer = EnvFilter::try_from_default_env()
             //     .or_else(|_| EnvFilter::try_new("info,tokio=trace,runtime=trace"))
             //     .unwrap();
-            let logger = registry().with(fmt_layer_b).with(fmt_layer_a).with(indicatif_layer);
-            
+            let logger = registry()
+                .with(fmt_layer_b)
+                .with(fmt_layer_a)
+                .with(indicatif_layer);
+
             logger.init();
         }
 

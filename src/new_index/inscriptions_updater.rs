@@ -16,8 +16,6 @@ use crate::{
 use anyhow::Result;
 use bitcoin::{consensus::Decodable, Address};
 use bitcoin::{hashes::Hash, Transaction, Txid};
-use hyper::body::Buf;
-use itertools::Itertools;
 
 use super::{Store, DB};
 
@@ -100,21 +98,26 @@ impl<'a> InscriptionUpdater<'a> {
                     .previous_output
                     .txid;
 
-                if let Some(mut shit) = store
+                if let Some(shit) = store
                     .inscription_db()
                     .remove(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.into_inner()))
                 {
                     //info!("Ord was move from:{:?} to:{:?}", prev_tx.to_hex(), txid.to_hex() );
-                    let new_owner = tx.output
+                    let new_owner = tx
+                        .output
                         .first()
-                        .and_then(|x|
-                            Address::from_script(&x.script_pubkey, bitcoin::network::constants::Network::Bitcoin)
-                        )
+                        .and_then(|x| {
+                            Address::from_script(
+                                &x.script_pubkey,
+                                bitcoin::network::constants::Network::Bitcoin,
+                            )
+                        })
                         .map(|x| x.to_string())
                         .anyhow_as("No owner :(")?
-                        .as_bytes().to_owned();
+                        .as_bytes()
+                        .to_owned();
                     let new_shit = [&shit[..32], &new_owner].concat();
-        
+
                     store
                         .inscription_db()
                         .put(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), &new_shit)
@@ -163,15 +166,19 @@ impl<'a> InscriptionUpdater<'a> {
                 );
 
                 let genesis = txs.first().anyhow_as("BIG COCKS")?.txid();
-                let owner = tx.output
-                        .first()
-                        .and_then(|x|
-                            Address::from_script(&x.script_pubkey, bitcoin::network::constants::Network::Bitcoin)
+                let owner = tx
+                    .output
+                    .first()
+                    .and_then(|x| {
+                        Address::from_script(
+                            &x.script_pubkey,
+                            bitcoin::network::constants::Network::Bitcoin,
                         )
-                        .map(|x| x.to_string())
-                        .anyhow_as("No owner :(")?
-                        .as_bytes().to_owned();
-                
+                    })
+                    .map(|x| x.to_string())
+                    .anyhow_as("No owner :(")?
+                    .as_bytes()
+                    .to_owned();
 
                 store.inscription_db().put(
                     &db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()),

@@ -1,13 +1,12 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
-use crate::inscription_entries::index::{INSCRIPTION_ID_TO_META, TXID_IS_INSCRIPTION};
-use crate::inscription_entries::inscription::InscriptionMeta;
-use crate::inscription_entries::{Entry, InscriptionId};
+use crate::inscription_entries::index::TXID_IS_INSCRIPTION;
+use crate::inscription_entries::InscriptionId;
 use crate::new_index::db::DBFlush;
 use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::schema::OrdsSearcher;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
-use crate::util::errors::{AsAnyhow, UnwrapPrint};
+use crate::util::errors::UnwrapPrint;
 use crate::util::{
     create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
     has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
@@ -20,6 +19,7 @@ use {bitcoin::consensus::encode, std::str::FromStr};
 use bitcoin::blockdata::opcodes;
 use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::hashes::{Error as HashError, Hash};
+use bitcoin::Address;
 use hex::{self, FromHexError};
 
 use hyper::service::{make_service_fn, service_fn};
@@ -32,7 +32,7 @@ use std::fs;
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json::{self, from_str};
+use serde_json::{self};
 use std::collections::HashMap;
 use std::num::ParseIntError;
 use std::os::unix::fs::FileTypeExt;
@@ -318,6 +318,8 @@ struct UtxoValue {
     pub outpoint: Option<Txid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub genesis: Option<Txid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Address>,
 }
 impl From<Utxo> for UtxoValue {
     fn from(utxo: Utxo) -> Self {
@@ -331,6 +333,7 @@ impl From<Utxo> for UtxoValue {
             content_type: utxo.content_type,
             genesis: utxo.genesis,
             outpoint: utxo.outpoint,
+            owner: utxo.address,
         }
     }
 }
@@ -959,48 +962,40 @@ fn handle_request(
             json_response(utxos, TTL_SHORT)
         }
         // todo update md
-        (
-            &Method::GET,
-            Some(&"topords"),
-            None,
-            None,
-            None,
-            None,
-        ) => {
-            let top_ords = query
-                .chain()
-                .new_ords(query.config().utxos_limit)?;
+        (&Method::GET, Some(&"topords"), None, None, None, None) => {
+            let top_ords = query.chain().new_ords(query.config().utxos_limit)?;
             json_response(top_ords, TTL_SHORT)
         }
         // todo update md
-        (
-            &Method::GET,
-            Some(script_type @ &"address"),
-            Some(script_str),
-            Some(&"ords"),
-            Some(page),
-            None,
-        )
-        | (
-            &Method::GET,
-            Some(script_type @ &"scripthash"),
-            Some(script_str),
-            Some(&"ords"),
-            Some(page),
-            None,
-        ) => {
-            let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
-            let page = from_str::<usize>(page).map_err(|_| "Page is incorrect".to_owned())?;
-            if page == 0 {
-                Err("Page is incorrect".to_owned())?;
-            }
-            let searcher = OrdsSearcher::Pagination(page, query.config().utxos_limit);
-            let utxos: Vec<UtxoValue> = query.ords(&script_hash[..], &searcher)?
-                .into_iter()
-                .map(UtxoValue::from)
-                .collect();
-            json_response(utxos, TTL_SHORT)
-        }
+        // (
+        //     &Method::GET,
+        //     Some(script_type @ &"address"),
+        //     Some(script_str),
+        //     Some(&"ords"),
+        //     Some(page),
+        //     None,
+        // )
+        // | (
+        //     &Method::GET,
+        //     Some(script_type @ &"scripthash"),
+        //     Some(script_str),
+        //     Some(&"ords"),
+        //     Some(page),
+        //     None,
+        // ) => {
+        //     let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
+        //     let page = from_str::<usize>(page).map_err(|_| "Page is incorrect".to_owned())?;
+        //     if page == 0 {
+        //         Err("Page is incorrect".to_owned())?;
+        //     }
+        //     let searcher = OrdsSearcher::Pagination(page, query.config().utxos_limit);
+        //     let utxos: Vec<UtxoValue> = query
+        //         .ords(&script_hash[..], &searcher)?
+        //         .into_iter()
+        //         .map(UtxoValue::from)
+        //         .collect();
+        //     json_response(utxos, TTL_SHORT)
+        // }
         (
             &Method::GET,
             Some(script_type @ &"address"),

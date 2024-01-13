@@ -8,7 +8,6 @@ extern crate tracing;
 extern crate electrs;
 
 use error_chain::ChainedError;
-use itertools::Itertools;
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +18,10 @@ use electrs::{
     electrum::RPC as ElectrumRPC,
     errors::*,
     metrics::Metrics,
-    new_index::{precache, ChainQuery, FetchFrom, Indexer, Mempool, Query, Store, schema::InscriptionParseBlock, exchange_data::ExchangeData},
+    new_index::{
+        exchange_data::ExchangeData, precache, schema::InscriptionParseBlock, ChainQuery,
+        FetchFrom, Indexer, Mempool, Query, Store,
+    },
     rest,
     signal::Waiter,
 };
@@ -65,11 +67,12 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &metrics,
     );
 
-    let last_indexed_block = store.txstore_db().get(b"t").map(|x|
-        bitcoin::consensus::encode::deserialize(&x).expect("invalid chain tip in `t`")
-    );
+    let last_indexed_block = store
+        .txstore_db()
+        .get(b"t")
+        .map(|x| bitcoin::consensus::encode::deserialize(&x).expect("invalid chain tip in `t`"));
 
-    let mut tip = indexer.update(&daemon, Arc::clone(&store))?;
+    let mut tip = indexer.update(&daemon)?;
 
     let chain = Arc::new(ChainQuery::new(
         Arc::clone(&store),
@@ -77,21 +80,20 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &config,
         &metrics,
     ));
-  
- //todo: handle this .unwrap() stupid bitch
+
+    //todo: handle this .unwrap() stupid bitch
     let block_from = if let Some(hash) = last_indexed_block {
         //let hash = bitcoin::consensus::encode::deserialize(&raw_hash).expect("invalid chain tip in `t`");
-        store.get_block_height(hash).unwrap_or(config.first_inscription_block)
-    }
-    else {
+        store
+            .get_block_height(hash)
+            .unwrap_or(config.first_inscription_block)
+    } else {
         config.first_inscription_block
     };
 
-
-    indexer.index_inscription(
-        chain.clone(),
-        InscriptionParseBlock::FromHeight(block_from),
-    ).unwrap();
+    indexer
+        .index_inscription(chain.clone(), InscriptionParseBlock::FromHeight(block_from))
+        .unwrap();
 
     let mempool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         Arc::clone(&chain),
@@ -107,9 +109,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         asset_db
     });
 
-    let exchange_data = Arc::new(parking_lot::Mutex::new(ExchangeData {
-        bells_price: None,
-    }));
+    let exchange_data = Arc::new(parking_lot::Mutex::new(ExchangeData { bells_price: None }));
 
     let query = Arc::new(Query::new(
         Arc::clone(&chain),
@@ -160,17 +160,15 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         // Index new blocks
         let current_tip = daemon.getbestblockhash()?;
         if current_tip != tip {
-            indexer.update(&daemon, Arc::clone(&store))?;
+            indexer.update(&daemon)?;
             tip = current_tip;
-            indexer.index_inscription(
-                chain.clone(), InscriptionParseBlock::Hash(tip)
-            ).unwrap();
+            indexer
+                .index_inscription(chain.clone(), InscriptionParseBlock::Hash(tip))
+                .unwrap();
         };
 
         // Update mempool
-        mempool
-            .write()
-            .update(&daemon)?;
+        mempool.write().update(&daemon)?;
 
         // Update subscribed clients
         electrum_server.notify();
