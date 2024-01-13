@@ -40,7 +40,19 @@ use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
 
 use super::inscriptions_updater::InscriptionUpdater;
 
-const MIN_HISTORY_ITEMS_TO_CACHE: usize = 100;
+const MIN_HISTORY_ITEMS_TO_CACHE: usize = 50;
+
+type Limit = usize;
+type Page = usize;
+
+const FIRST_ORDS_BLOCK:usize = 22490;
+
+pub enum OrdsSearcher{
+    After(Txid, Limit),
+    New(Limit),
+    Pagination(Page,Limit),
+    All,
+}
 
 pub struct Store {
     // TODO: should be column families
@@ -349,9 +361,6 @@ impl Indexer {
         let new_headers = self.get_new_headers(&daemon, &tip)?;
 
         let to_add = self.headers_to_add(&new_headers);
-        // let mut asd = to_add.iter().map(|x| x.height()).collect_vec();
-        // asd.sort_unstable();
-        // error!("{:#?}", asd);
         
         debug!(
             "adding transactions from {} blocks using {:?}",
@@ -664,15 +673,12 @@ impl ChainQuery {
     }
 
     // TODO: avoid duplication with stats/stats_delta?
-    pub fn utxo(&self, scripthash: &[u8], inscription: bool,limit: usize, flush: DBFlush) -> Result<Vec<Utxo>> {
+    pub fn utxo(&self, scripthash: &[u8], limit: usize, flush: DBFlush) -> Result<Vec<Utxo>> {
         let _timer = self.start_timer("utxo");
-
         // get the last known utxo set and the blockhash it was updated for.
         // invalidates the cache if the block was orphaned.
-       // G is cache table for inscription
-       let key = if inscription { b'G'} else { b'U'};
+        let key = b'U';
         
-
         let cache: Option<(UtxoMap, usize)> = self
             .store
             .cache_db
@@ -687,8 +693,8 @@ impl ChainQuery {
 
         // update utxo set with new transactions since
         let (newutxos, lastblock, processed_items) = cache.map_or_else(
-            || self.utxo_delta(scripthash, inscription, HashMap::new(), 0, limit),
-            |(oldutxos, blockheight)| self.utxo_delta(scripthash, inscription, oldutxos, blockheight + 1, limit),
+            || self.utxo_delta(scripthash, HashMap::new(), 0, limit),
+            |(oldutxos, blockheight)| self.utxo_delta(scripthash, oldutxos, blockheight + 1, limit),
         )?;
 
         // save updated utxo set to cache
@@ -733,7 +739,6 @@ impl ChainQuery {
     fn utxo_delta(
         &self,
         scripthash: &[u8],
-        inscription: bool,
         init_utxos: UtxoMap,
         start_height: usize,
         limit: usize,
@@ -760,25 +765,12 @@ impl ChainQuery {
         
             match history.key.txinfo {
                 TxHistoryInfo::Funding(ref info) => {
-                    let genesis_ord = self.store.inscription_db().get(&db_key!(TXID_IS_INSCRIPTION, &info.txid));
-
-                    if genesis_ord.is_some() == inscription {
-                        let inscription_id = {
-                            if let Some(v) = genesis_ord {
-                                Some(
-                                    InscriptionId {
-                                        txid: Txid::from_slice(&v).anyhow_as("Txid parse problem")?,
-                                        index: 0,
-                                    }
-                                )
-                            } else {
-                                None
-                            }
-                        };
-                        utxos.insert(history.get_funded_outpoint(), (blockid, info.value, inscription_id));
+                    let is_inscription = self.store.inscription_db().get(&db_key!(TXID_IS_INSCRIPTION, &info.txid)).is_some();
+                    if !is_inscription {
+                        utxos.insert(history.get_funded_outpoint(), (blockid, info.value, None));
                     }
                 }
-                TxHistoryInfo::Spending(_) => {utxos.remove(&history.get_funded_outpoint());},
+                TxHistoryInfo::Spending(_) => { utxos.remove(&history.get_funded_outpoint()); },
                 #[cfg(feature = "liquid")]
                 TxHistoryInfo::Issuing(_)
                 | TxHistoryInfo::Burning(_)
@@ -799,14 +791,12 @@ impl ChainQuery {
 
 
     // TODO: avoid duplication with stats/stats_delta?
-    pub fn ords(&self, scripthash: &[u8], txid: Option<Txid>, limit: usize, flush: DBFlush) -> Result<Vec<Utxo>> {
+    pub fn ords(&self, scripthash: &[u8], searcher: &OrdsSearcher, flush: DBFlush) -> Result<Vec<Utxo>> {
         let _timer = self.start_timer("ords");
+        let key = b'O';  // O is cache table for ords
 
         // get the last known utxo set and the blockhash it was updated for.
         // invalidates the cache if the block was orphaned.
-       // G is cache table for inscription
-        let key = b'G';
-
         let cache: Option<(UtxoMap, usize)> = self
             .store
             .cache_db
@@ -818,52 +808,62 @@ impl ChainQuery {
             })
             .map(|(utxos_cache, height)| (from_utxo_cache(utxos_cache, self), height));
         let had_cache = cache.is_some();
-        error!("had_cache {had_cache:?}");
-        // update utxo set with new transactions since
-
-        let newutxos = self.ord_utxo(scripthash, txid.as_ref(), limit).anyhow()?;
-        // let (newutxos, lastblock, processed_items) = cache.map_or_else(
-        //     || self.ords_delta(scripthash, HashMap::new(), limit, 22490),
-        //     |(oldutxos, block_height)| self.ords_delta(scripthash, oldutxos, limit, block_height),
-        // )?;
+        let cache_utxos = &mut cache.map(|(utxo,_)| utxo).unwrap_or_default();
         
+        // update utxo set with new transactions since
+        let (newutxos, lastblock, processed_items) = self.ords_utxo(
+            scripthash,
+            cache_utxos, 
+            searcher
+        ).anyhow()?;
+        let mut newutxos = newutxos.into_iter().collect_vec();
+
+        cache_utxos.extend(newutxos.clone());
+        if let OrdsSearcher::Pagination(page, limit) = searcher {
+            let offset = (page - 1)*limit;
+            newutxos = cache_utxos.iter()
+                .skip(offset + 1)
+                .take(*limit)
+                .map(|(a,b)| (*a, b.clone()))
+                .collect_vec();
+        }
 
         // save updated utxo set to cache
-        // if let Some(lastblock) = lastblock {
-        //     if had_cache || processed_items > MIN_HISTORY_ITEMS_TO_CACHE {
-        //         self.store.cache_db.write(
-        //             vec![UtxoCacheRow::new(scripthash, &newutxos, &lastblock, key).into_row()],
-        //             flush,
-        //         );
-        //     }
-        // }
+        if let Some(lastblock) = lastblock {
+            if had_cache || processed_items > MIN_HISTORY_ITEMS_TO_CACHE { 
+                self.store.cache_db.write(
+                    vec![UtxoCacheRow::new(scripthash, cache_utxos, &lastblock, key).into_row()],
+                    flush,
+                );
+            }
+        }
+
         // format as Utxo objects
-        Ok(newutxos)
-        // Ok(newutxos
-        //     .into_iter()
-        //     .map(|(outpoint, (blockid, value, inscription_id))| {
-        //         // in elements/liquid chains, we have to lookup the txo in order to get its
-        //         // associated asset. the asset information could be kept in the db history rows
-        //         // alongside the value to avoid this.
-        //         #[cfg(feature = "liquid")]
-        //         let txo = self.lookup_txo(&outpoint).expect("missing utxo");
+        Ok(newutxos
+            .into_iter()
+            .map(|(outpoint, (blockid, value, inscription_id))| {
+                // in elements/liquid chains, we have to lookup the txo in order to get its
+                // associated asset. the asset information could be kept in the db history rows
+                // alongside the value to avoid this.
+                #[cfg(feature = "liquid")]
+                let txo = self.lookup_txo(&outpoint).expect("missing utxo");
 
-        //         Utxo {
-        //             txid: outpoint.txid,
-        //             vout: outpoint.vout,
-        //             value,
-        //             confirmed: Some(blockid),
-        //             inscription_id, 
+                Utxo {
+                    txid: outpoint.txid,
+                    vout: outpoint.vout,
+                    value,
+                    confirmed: Some(blockid),
+                    inscription_id, 
 
-        //             #[cfg(feature = "liquid")]
-        //             asset: txo.asset,
-        //             #[cfg(feature = "liquid")]
-        //             nonce: txo.nonce,
-        //             #[cfg(feature = "liquid")]
-        //             witness: txo.witness,
-        //         }
-        //     })
-        //      .collect())
+                    #[cfg(feature = "liquid")]
+                    asset: txo.asset,
+                    #[cfg(feature = "liquid")]
+                    nonce: txo.nonce,
+                    #[cfg(feature = "liquid")]
+                    witness: txo.witness,
+                }
+            })
+             .collect())
     }
 
 
@@ -900,7 +900,6 @@ impl ChainQuery {
                     let genesis_ord = self.store.inscription_db().get(&db_key!(TXID_IS_INSCRIPTION, &info.txid));
 
                     if let Some(v) = genesis_ord {
-                        error!("GAVNO");
                         let inscription_id = InscriptionId {
                             txid: Txid::from_slice(&v).anyhow_as("Txid parse problem")?,
                             index: 0,
@@ -928,89 +927,42 @@ impl ChainQuery {
     }
 
 
-
-
-    pub fn ord_utxo(&self, scripthash: &[u8], last_seen_txid: Option<&Txid>, limit: usize,) -> Result<Vec<Utxo>> {
-
-        // let txs_conf = self
-        //     .history_iter_scan_reverse(code, hash)
-        //     .map(|row| TxHistoryRow::from_row(row).get_txid())
-        //     // XXX: unique() requires keeping an in-memory list of all txids, can we avoid that?
-        //     .unique()
-        //     // TODO seek directly to last seen tx without reading earlier rows
-        //     .skip_while(|txid| {
-        //         // skip until we reach the last_seen_txid
-        //         last_seen_txid.map_or(false, |last_seen_txid| last_seen_txid != txid)
-        //     })
-        //     .skip(match last_seen_txid {
-        //         Some(_) => 1, // skip the last_seen_txid itself
-        //         None => 0,
-        //     })
-        //     .filter_map(|txid| self.tx_confirming_block(&txid).map(|b| (txid, b)))
-        //     .take(limit)
-        //     .collect::<Vec<(Txid, BlockId)>>();
-
-        // Ok(self
-        //     .lookup_txns(&txs_conf)
-        //     .map_err(|e| format!("failed looking up txs in history index: {e:?}"))?
-        //     .into_iter()
-        //     .zip(txs_conf)
-        //     .map(|(tx, (_, blockid))| (tx, blockid))
-        //     .collect())
-
-
-
-        let _timer = self.start_timer("utxo_delta");
-        let height = self.tx_confirming_block(last_seen_txid.unwrap()).unwrap().height;
-        let history_iter = self
-            .history_iter_scan(b'H', scripthash, height)
-            .map(TxHistoryRow::from_row)
-            // TODO seek directly to last seen tx without reading earlier rows
-            .skip_while(|history| {
-                // skip until we reach the last_seen_txid
-                last_seen_txid.map_or(false, |last_seen_txid| last_seen_txid != &history.get_txid())
-            })
-            .skip(match last_seen_txid {
-                Some(_) => 1, // skip the last_seen_txid itself
-                None => 0,
-            })
-            //.filter_map(|txid| self.tx_confirming_block(&txid).map(|b| (txid, b)))
-            .filter_map(|history| {
-               
-                info!("history txid {:?}", history.get_txid().to_hex());
-                self.tx_confirming_block(&history.get_txid())
-                    // drop history entries that were previously confirmed in a re-orged block and later
-                    // confirmed again at a different height
-                    .filter(|blockid| blockid.height == history.key.confirmed_height as usize)
-                    .map(|b| (history, b))
-            });
-            // .map(|x| x.0.get_txid())
-            // .unique();
-
+    fn ords_iter(&self, cache_utxo: &mut UtxoMap , history_iter: impl Iterator<Item = TxHistoryRow>, limit: usize) -> Result<(UtxoMap, Option<BlockHash>, usize)> {
+        //let mut utxos = ords_utxo;
         let mut utxos = UtxoMap::new();
 
+        let history_iter = history_iter.filter_map(|history| {
+            self.tx_confirming_block(&history.get_txid())
+                // drop history entries that were previously confirmed in a re-orged block and later
+                // confirmed again at a different height
+                .filter(|blockid| blockid.height == history.key.confirmed_height as usize)
+                .map(|b| (history, b))
+        });
+
+
+        let mut processed_items = 0;
+        let mut lastblock = None;
+
         for (history, blockid) in history_iter {
+            processed_items += 1;
+            lastblock = Some(blockid.hash);
+            
             match history.key.txinfo {
                 TxHistoryInfo::Funding(ref info) => {
                     let genesis_ord = self.store.inscription_db().get(&db_key!(TXID_IS_INSCRIPTION, &info.txid));
-
-                    if genesis_ord.is_some() {
-                        let inscription_id = {
-                            if let Some(v) = genesis_ord {
-                                Some(
-                                    InscriptionId {
-                                        txid: Txid::from_slice(&v).anyhow_as("Txid parse problem")?,
-                                        index: 0,
-                                    }
-                                )
-                            } else {
-                                None
-                            }
+                    if let Some(genesis_txid) = genesis_ord {
+                        let inscription_id = InscriptionId {
+                            txid: Txid::from_slice(&genesis_txid).anyhow_as("Txid parse problem")?,
+                            index: 0,
                         };
-                        utxos.insert(history.get_funded_outpoint(), (blockid, info.value, inscription_id));
+                        utxos.insert(history.get_funded_outpoint(), (blockid, info.value, Some(inscription_id)));
                     }
                 }
-                TxHistoryInfo::Spending(_) => {utxos.remove(&history.get_funded_outpoint());},
+                TxHistoryInfo::Spending(_) => {
+                    let out_point = &history.get_funded_outpoint();
+                    utxos.remove(out_point);
+                    cache_utxo.remove(out_point);
+                },
                 #[cfg(feature = "liquid")]
                 TxHistoryInfo::Issuing(_)
                 | TxHistoryInfo::Burning(_)
@@ -1025,18 +977,34 @@ impl ChainQuery {
             }
         }
 
-        Ok(utxos
-            .into_iter()
-            .map(|(outpoint, (blockid, value, inscription_id))| {
+        Ok((utxos, lastblock, processed_items))
+    }
 
-                Utxo {
-                    txid: outpoint.txid,
-                    vout: outpoint.vout,
-                    value,
-                    confirmed: Some(blockid),
-                    inscription_id, 
-                }
-        }).collect())
+    pub fn ords_utxo(&self, scripthash: &[u8], ords_utxo: &mut UtxoMap, searcher: &OrdsSearcher,) -> Result<(UtxoMap, Option<BlockHash>, usize)> {
+        let _timer = self.start_timer("ords_utxo");
+
+        match searcher {
+            OrdsSearcher::After(last_seen_txid, limit) => {
+                let height = self.tx_confirming_block(last_seen_txid)
+                .anyhow_as("No block height")?
+                .height;
+                let history_iter = self.history_iter_scan(b'H', scripthash, height)
+                    .map(TxHistoryRow::from_row)
+                    .skip_while(|history| last_seen_txid != &history.get_txid())  // skip until we reach the last_seen_txid  
+                    .skip(1); // skip last_seen_txid
+                self.ords_iter(ords_utxo, history_iter, *limit) 
+            },
+            OrdsSearcher::New(limit) | OrdsSearcher::Pagination(_, limit) => {
+                let history_iter = self.history_iter_scan_reverse(b'H', scripthash)
+                .map(TxHistoryRow::from_row);
+                self.ords_iter(ords_utxo, history_iter, *limit)    
+            },
+            OrdsSearcher::All => {
+                let history_iter = self.history_iter_scan(b'H', scripthash, FIRST_ORDS_BLOCK)
+                    .map(TxHistoryRow::from_row);
+                self.ords_iter(ords_utxo, history_iter, usize::MAX) 
+            },
+        }
     }
 
     pub fn stats(&self, scripthash: &[u8], flush: DBFlush) -> ScriptStats {

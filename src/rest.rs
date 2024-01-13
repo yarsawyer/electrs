@@ -2,6 +2,7 @@ use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, T
 use crate::config::{Config, VERSION_STRING};
 use crate::inscription_entries::index::TXID_IS_INSCRIPTION;
 use crate::new_index::db::DBFlush;
+use crate::new_index::schema::OrdsSearcher;
 use crate::{errors, db_key};
 use crate::new_index::exchange_data::get_bells_price;
 use crate::inscription_entries::InscriptionId;
@@ -30,7 +31,7 @@ use std::fs;
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json;
+use serde_json::{self, from_str};
 use std::collections::HashMap;
 use std::num::ParseIntError;
 use std::os::unix::fs::FileTypeExt;
@@ -849,16 +850,25 @@ fn handle_request(
             last_seen_txid,
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
-            let last_seen_txid: Option<Txid> = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok());
-
-            
-            let utxos: Vec<UtxoValue> = query.chain()
-                .ords(&script_hash[..], last_seen_txid, 500, DBFlush::Enable)?
+            let Some(last_seen_txid) = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok())
+            else { 
+                let msg = last_seen_txid.map_or(
+                    "txid is empty".to_owned(),
+                    |x| format!("txid is wrong {}",x)
+                );
+                return Err(HttpError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    msg,
+                ));
+            };
+            let searcher = OrdsSearcher::After(last_seen_txid, query.config().utxos_limit);
+            let ords: Vec<UtxoValue> = query.chain()
+                .ords(&script_hash[..], &searcher, DBFlush::Enable)?
                 .into_iter()
                 .map(UtxoValue::from)
                 .collect();
             // XXX paging?
-            json_response(utxos, TTL_SHORT)
+            json_response(ords, TTL_SHORT)
         }
         (
             &Method::GET,
@@ -917,12 +927,43 @@ fn handle_request(
             None,
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
+            let searcher = OrdsSearcher::New(query.config().utxos_limit);
             let utxos: Vec<UtxoValue> = query
-                .utxo(&script_hash[..], true)?
+                .chain()
+                .ords(&script_hash[..], &searcher, DBFlush::Enable)?
                 .into_iter()
                 .map(UtxoValue::from)
                 .collect();
             // XXX paging?
+            json_response(utxos, TTL_SHORT)
+        }
+        // todo update md
+        (
+            &Method::GET,
+            Some(script_type @ &"address"),
+            Some(script_str),
+            Some(&"ords"),
+            Some(page),
+            None,
+        )
+        | (
+            &Method::GET,
+            Some(script_type @ &"scripthash"),
+            Some(script_str),
+            Some(&"ords"),
+            Some(page),
+            None,
+        ) => {
+            let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
+            let page = from_str::<usize>(page).map_err(|_| "Page is incorrect".to_owned())?;
+            if page == 0 { Err("Page is incorrect".to_owned())?; } 
+            let searcher = OrdsSearcher::Pagination(page, query.config().utxos_limit);
+            let utxos: Vec<UtxoValue> = query
+                .chain()
+                .ords(&script_hash[..], &searcher, DBFlush::Enable)?
+                .into_iter()
+                .map(UtxoValue::from)
+                .collect();
             json_response(utxos, TTL_SHORT)
         }
         (
@@ -943,7 +984,7 @@ fn handle_request(
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
             let utxos: Vec<UtxoValue> = query
-                .utxo(&script_hash[..], false)?
+                .utxo(&script_hash[..])?
                 .into_iter()
                 .map(UtxoValue::from)
                 .collect();
