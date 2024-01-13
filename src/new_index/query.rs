@@ -85,21 +85,17 @@ impl Query {
         Ok(txid)
     }
 
-    pub fn utxo(&self, scripthash: &[u8], inscription: bool) -> Result<Vec<Utxo>> {
+    pub fn utxo(&self, scripthash: &[u8]) -> Result<Vec<Utxo>> {
         let mut utxos = self.chain.utxo(
             scripthash,
-            inscription,
             self.config.utxos_limit,
             super::db::DBFlush::Enable,
         )?;
 
         let mempool = self.mempool();
         utxos.retain(|utxo| !mempool.has_spend(&OutPoint::from(utxo)));
-        
-        if !inscription {
-            utxos.extend(mempool.utxo(scripthash)?);
-        }
-     
+        utxos.extend(mempool.utxo(scripthash)?);
+
         Ok(utxos)
     }
 

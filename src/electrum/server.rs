@@ -320,7 +320,7 @@ impl Connection {
 
     fn blockchain_scripthash_listunspent(&self, params: &[Value]) -> Result<Value> {
         let script_hash = hash_from_value(params.first()).chain_err(|| "bad script_hash")?;
-        let utxos = self.query.utxo(&script_hash[..], false)?;
+        let utxos = self.query.utxo(&script_hash[..])?;
 
         let to_json = |utxo: Utxo| {
             let json = json!({
