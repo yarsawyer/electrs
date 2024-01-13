@@ -961,6 +961,20 @@ fn handle_request(
         // todo update md
         (
             &Method::GET,
+            Some(&"topords"),
+            None,
+            None,
+            None,
+            None,
+        ) => {
+            let top_ords = query
+                .chain()
+                .new_ords(query.config().utxos_limit)?;
+            json_response(top_ords, TTL_SHORT)
+        }
+        // todo update md
+        (
+            &Method::GET,
             Some(script_type @ &"address"),
             Some(script_str),
             Some(&"ords"),
@@ -981,9 +995,7 @@ fn handle_request(
                 Err("Page is incorrect".to_owned())?;
             }
             let searcher = OrdsSearcher::Pagination(page, query.config().utxos_limit);
-            let utxos: Vec<UtxoValue> = query
-                .chain()
-                .ords(&script_hash[..], &searcher, DBFlush::Enable)?
+            let utxos: Vec<UtxoValue> = query.ords(&script_hash[..], &searcher)?
                 .into_iter()
                 .map(UtxoValue::from)
                 .collect();

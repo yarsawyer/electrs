@@ -3,7 +3,7 @@ use bitcoin::hashes::hex::ToHex;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hashes::Hash;
 use bitcoin::util::merkleblock::MerkleBlock;
-use bitcoin::VarInt;
+use bitcoin::{VarInt, Address};
 use itertools::Itertools;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use bitcoin::consensus::encode::{deserialize, serialize};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
+use std::any::Any;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 use std::path::Path;
@@ -22,13 +23,13 @@ use crate::chain::{
 };
 use crate::config::Config;
 use crate::daemon::Daemon;
+use crate::inscription_entries::InscriptionId;
 use crate::inscription_entries::index::{
     ID_TO_ENTRY, INSCRIPTION_ID_TO_META, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS,
     INSCRIPTION_TXID_TO_TX, NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS,
     SAT_TO_INSCRIPTION_ID, TXID_IS_INSCRIPTION,
 };
-use crate::inscription_entries::inscription::InscriptionMeta;
-use crate::inscription_entries::{inscription, Entry, InscriptionId};
+use crate::inscription_entries::{inscription::{InscriptionMeta,self}, Entry};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
@@ -137,6 +138,7 @@ impl Store {
             .header_by_blockhash(&hash)
             .map(|x| x.height())
     }
+
 }
 
 type UtxoMap = HashMap<OutPoint, (BlockId, Value, Option<InscriptionId>)>;
@@ -810,6 +812,39 @@ impl ChainQuery {
         Ok((utxos, lastblock, processed_items))
     }
 
+    pub fn new_ords(&self, limit: usize) -> Result<Vec<(String ,InscriptionId, InscriptionMeta)>> {
+        let prefix = INSCRIPTION_ID_TO_TXIDS.as_bytes();
+        let iter = self.store
+            .inscription_db()
+            .raw_rev_iter(prefix)
+            .take(limit)
+            .map(|x| x.map(|x| x.0[prefix.len()..].to_vec()));
+        
+        let mut ords = vec![];
+        for key in iter {
+            let raw_inscription_id = key.anyhow()?;
+            let raw_meta = self.store.inscription_db()
+                .get(&db_key!(INSCRIPTION_ID_TO_META,&raw_inscription_id))
+                .anyhow()?;
+            let meta = InscriptionMeta::from_bytes(&raw_meta).anyhow()?;
+
+            let inscription_id = InscriptionId {
+                txid: Txid::from_slice(&raw_inscription_id[..32]).anyhow()?,
+                index: u32::from_be_bytes(raw_inscription_id[32..].try_into().anyhow()?),
+            };
+            let tx = self.store.txstore_db().get(&db_key!("T", &raw_inscription_id[..32])).anyhow()?;
+            let tx = bitcoin::Transaction::consensus_decode(std::io::Cursor::new(tx)).anyhow()?;
+            let owner = tx.output.first().unwrap().script_pubkey.clone();
+            //Network::
+            //if owner.is_p2pk() { owner.to_address_str(network)}
+            
+            let owner = Address::from_script(&owner, bitcoin::network::constants::Network::Bitcoin).anyhow()?;
+            ords.push((owner.to_string(), inscription_id, meta));
+        }
+        
+        Ok(ords)
+    }
+
     // TODO: avoid duplication with stats/stats_delta?
     pub fn ords(
         &self,
@@ -1046,22 +1081,15 @@ impl ChainQuery {
         Ok((utxos, lastblock, processed_items))
     }
 
-    pub fn ords_utxo(
-        &self,
-        scripthash: &[u8],
-        ords_utxo: &mut UtxoMap,
-        searcher: &OrdsSearcher,
-    ) -> Result<(UtxoMap, Option<BlockHash>, usize)> {
+    pub fn ords_utxo(&self, scripthash: &[u8], ords_utxo: &mut UtxoMap, searcher: &OrdsSearcher,) -> Result<(UtxoMap, Option<BlockHash>, usize)> {
         let _timer = self.start_timer("ords_utxo");
 
         match searcher {
             OrdsSearcher::After(last_seen_txid, limit) => {
-                let height = self
-                    .tx_confirming_block(last_seen_txid)
-                    .anyhow_as("No block height")?
-                    .height;
-                let history_iter = self
-                    .history_iter_scan(b'H', scripthash, height)
+                let height = self.tx_confirming_block(last_seen_txid)
+                .anyhow_as("No block height")?
+                .height;
+                let history_iter = self.history_iter_scan(b'H', scripthash, height)
                     .map(TxHistoryRow::from_row)
                     .skip_while(|history| last_seen_txid != &history.get_txid()) // skip until we reach the last_seen_txid
                     .skip(1); // skip last_seen_txid

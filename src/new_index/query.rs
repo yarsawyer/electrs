@@ -8,12 +8,15 @@ use std::time::{Duration, Instant};
 use crate::chain::{Network, OutPoint, Transaction, TxOut, Txid};
 use crate::config::Config;
 use crate::daemon::Daemon;
+use crate::inscription_entries::InscriptionId;
 use crate::inscription_entries::index::TXID_IS_INSCRIPTION;
+use crate::inscription_entries::inscription::InscriptionMeta;
 use crate::new_index::{ChainQuery, Mempool, ScriptStats, SpendingInput, Utxo};
 use crate::util::{is_spendable, BlockId, Bytes, TransactionStatus};
 use crate::{db_key, errors::*};
 
 use super::exchange_data::ExchangeData;
+use super::schema::OrdsSearcher;
 
 const FEE_ESTIMATES_TTL: u64 = 60; // seconds
 
@@ -90,6 +93,16 @@ impl Query {
         let mempool = self.mempool();
         utxos.retain(|utxo| !mempool.has_spend(&OutPoint::from(utxo)));
         utxos.extend(mempool.utxo(scripthash)?);
+
+        Ok(utxos)
+    }
+
+    pub fn ords(&self, scripthash: &[u8], searcher: &OrdsSearcher) -> Result<Vec<Utxo>> {
+        let utxos = self.chain.ords(
+            scripthash,
+            searcher,
+            super::db::DBFlush::Enable,
+        )?;
 
         Ok(utxos)
     }

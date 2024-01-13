@@ -121,6 +121,11 @@ impl DB {
             done: false,
         }
     }
+    pub fn raw_rev_iter(&self, prefix: &[u8]) -> rocksdb::DBIteratorWithThreadMode<rocksdb::DB> {
+        let mode = rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Reverse);
+        self.db.iterator(mode)
+    }
+    
 
     pub fn iter_scan_from(&self, prefix: &[u8], start_at: &[u8]) -> ScanIterator {
         let iter = self.db.iterator(rocksdb::IteratorMode::From(
