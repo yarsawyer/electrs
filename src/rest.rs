@@ -2,12 +2,12 @@ use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, T
 use crate::config::{Config, VERSION_STRING};
 use crate::inscription_entries::index::{INSCRIPTION_ID_TO_META, TXID_IS_INSCRIPTION};
 use crate::inscription_entries::inscription::InscriptionMeta;
-use crate::inscription_entries::InscriptionId;
+use crate::inscription_entries::{Entry, InscriptionId};
 use crate::new_index::db::DBFlush;
 use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::schema::OrdsSearcher;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
-use crate::util::errors::UnwrapPrint;
+use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
     has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
@@ -308,7 +308,16 @@ struct UtxoValue {
     vout: u32,
     status: TransactionStatus,
     value: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     inscription_id: Option<InscriptionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_length: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outpoint: Option<Txid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genesis: Option<Txid>,
 }
 impl From<Utxo> for UtxoValue {
     fn from(utxo: Utxo) -> Self {
@@ -318,6 +327,10 @@ impl From<Utxo> for UtxoValue {
             status: TransactionStatus::from(utxo.confirmed),
             value: utxo.value,
             inscription_id: utxo.inscription_id,
+            content_length: utxo.content_length,
+            content_type: utxo.content_type,
+            genesis: utxo.genesis,
+            outpoint: utxo.outpoint,
         }
     }
 }
@@ -608,17 +621,6 @@ fn handle_request(
 
             let header_hex = hex::encode(encode::serialize(&header));
             http_message(StatusCode::OK, header_hex, TTL_LONG)
-        }
-        (&Method::GET, Some(&"ord"), Some(hash), None, None, None) => {
-            let inscription_meta = query
-                .chain()
-                .store()
-                .inscription_db()
-                .get(&db_key!(INSCRIPTION_ID_TO_META, &hash.as_bytes()))
-                .map(|x| InscriptionMeta::from_bytes(&x))
-                .unwrap()
-                .unwrap();
-            json_response(inscription_meta, TTL_LONG)
         }
         (&Method::GET, Some(&"block"), Some(hash), Some(&"raw"), None, None) => {
             let hash = BlockHash::from_hex(hash)?;

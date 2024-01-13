@@ -23,10 +23,10 @@ pub(crate) struct Inscription {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct InscriptionMeta {
-    content_type: String,
-    content_length: usize,
-    outpoint: Txid,
-    genesis: Txid,
+    pub(crate) content_type: String,
+    pub(crate) content_length: usize,
+    pub(crate) outpoint: Txid,
+    pub(crate) genesis: Txid,
 }
 
 impl InscriptionMeta {

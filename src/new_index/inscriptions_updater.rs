@@ -156,9 +156,9 @@ impl<'a> InscriptionUpdater<'a> {
                 );
 
                 let inscription_meta = InscriptionMeta::new(
-                    _inscription.content_type().unwrap().to_owned(),
-                    _inscription.content_length().unwrap(),
-                    og_inscription_id.txid,
+                    _inscription.content_type().anyhow()?.to_owned(),
+                    _inscription.content_length().anyhow()?,
+                    txs.last().anyhow()?.txid(),
                     og_inscription_id.txid,
                 );
 

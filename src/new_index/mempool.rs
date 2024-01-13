@@ -3,7 +3,6 @@ use itertools::Itertools;
 
 use bitcoin::consensus::encode::serialize;
 
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::ops::Bound::{Excluded, Unbounded};
@@ -22,7 +21,6 @@ use crate::new_index::{
 use crate::util::fees::{make_fee_histogram, TxFeeInfo};
 use crate::util::{extract_tx_prevouts, full_hash, has_prevout, is_spendable, Bytes};
 
-
 pub struct Mempool {
     chain: Arc<ChainQuery>,
     config: Arc<Config>,
@@ -37,7 +35,6 @@ pub struct Mempool {
     latency: HistogramVec, // mempool requests latency
     delta: HistogramVec,   // # of added/removed txs
     count: GaugeVec,       // current state of the mempool
-
 }
 
 // A simplified transaction view used for the list of most recent transactions
@@ -123,11 +120,10 @@ impl Mempool {
         limit: usize,
     ) -> Result<Vec<Transaction>> {
         let _timer = self.latency.with_label_values(&["history"]).start_timer();
-        self.history
-            .get(scripthash)
-            .map_or_else( || Ok(std::vec::Vec::new()), |entries| {
-                self._history(entries, last_seen_txid, limit)
-            })
+        self.history.get(scripthash).map_or_else(
+            || Ok(std::vec::Vec::new()),
+            |entries| self._history(entries, last_seen_txid, limit),
+        )
     }
 
     pub fn history_txids_iter<'a>(&'a self, scripthash: &[u8]) -> impl Iterator<Item = Txid> + 'a {
@@ -157,7 +153,12 @@ impl Mempool {
                 None => 0,
             })
             .take(limit)
-            .map(|txid| self.txstore.get(&txid).cloned().chain_err(|| "missing mempool tx"))
+            .map(|txid| {
+                self.txstore
+                    .get(&txid)
+                    .cloned()
+                    .chain_err(|| "missing mempool tx")
+            })
             .try_collect()
     }
 
@@ -186,7 +187,9 @@ impl Mempool {
 
         let mut utxo = vec![];
         for entry in entries {
-            let TxHistoryInfo::Funding(info) = entry else { continue };
+            let TxHistoryInfo::Funding(info) = entry else {
+                continue;
+            };
 
             let txid = deserialize(&info.txid)
                 .map_err(|e| format!("invalid txid: {:?}. {e:?}", info.txid))?;
@@ -196,10 +199,14 @@ impl Mempool {
                 value: info.value,
                 confirmed: None,
                 inscription_id: None,
+                content_length: None,
+                content_type: None,
+                genesis: None,
+                outpoint: None,
             };
 
             if !self.has_spend(&OutPoint::from(&v)) {
-                utxo.push(v); 
+                utxo.push(v);
             }
         }
         Ok(utxo)
@@ -230,7 +237,7 @@ impl Mempool {
                 TxHistoryInfo::Spending(info) => {
                     stats.spent_txo_count += 1;
                     stats.spent_txo_sum += info.value;
-                }  
+                }
             };
         }
 
@@ -443,7 +450,6 @@ impl Mempool {
                 self.edges.insert(txi.previous_output, (txid, i as u32));
             }
 
-
             processed_count += 1;
         }
 
@@ -531,12 +537,9 @@ impl Mempool {
             !entries.is_empty()
         });
 
-
         self.edges
             .retain(|_outpoint, (txid, _vin)| !to_remove.contains(txid));
     }
-
-
 }
 
 #[derive(Serialize)]
