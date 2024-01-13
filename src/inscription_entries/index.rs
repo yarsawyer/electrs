@@ -93,6 +93,7 @@ define_prefix! { SAT_TO_SATPOINT, STS }
 define_prefix! { SATPOINT_TO_INSCRIPTION_ID, SPTID }
 define_prefix! { INSCRIPTION_ID_TO_SATPOINT, IDTS }
 define_prefix! { INSCRIPTION_ID_TO_TXIDS, IITT }
+define_prefix! { INSCRIPTION_ID_TO_META, IITM }
 define_prefix! { INSCRIPTION_TXID_TO_TX, ITTT }
 define_prefix! { INSCRIPTION_NUMBER_TO_INSCRIPTION_ID, INTI }
 define_prefix! { INSCRIPTION_ID_TO_INSCRIPTION_ENTRY, IITE }
