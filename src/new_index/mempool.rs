@@ -203,6 +203,7 @@ impl Mempool {
                 content_type: None,
                 genesis: None,
                 outpoint: None,
+                address: None,
             };
 
             if !self.has_spend(&OutPoint::from(&v)) {

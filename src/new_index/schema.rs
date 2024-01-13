@@ -1,9 +1,8 @@
 use bitcoin::consensus::Decodable;
-use bitcoin::hashes::hex::ToHex;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hashes::Hash;
 use bitcoin::util::merkleblock::MerkleBlock;
-use bitcoin::{VarInt, Address};
+use bitcoin::{Address, VarInt};
 use itertools::Itertools;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -11,11 +10,10 @@ use sha2::{Digest, Sha256};
 use bitcoin::consensus::encode::{deserialize, serialize};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
-use std::any::Any;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
+use std::ops::Add;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::chain::{
@@ -23,18 +21,16 @@ use crate::chain::{
 };
 use crate::config::Config;
 use crate::daemon::Daemon;
-use crate::inscription_entries::InscriptionId;
 use crate::inscription_entries::index::{
-    ID_TO_ENTRY, INSCRIPTION_ID_TO_META, INSCRIPTION_ID_TO_SATPOINT, INSCRIPTION_ID_TO_TXIDS,
-    INSCRIPTION_TXID_TO_TX, NUMBER_TO_ID, OUTPOINT_TO_VALUE, PARTIAL_TXID_TO_TXIDS,
-    SAT_TO_INSCRIPTION_ID, TXID_IS_INSCRIPTION,
+    INSCRIPTION_ID_TO_META, PARTIAL_TXID_TO_TXIDS, TXID_IS_INSCRIPTION,
 };
-use crate::inscription_entries::{inscription::{InscriptionMeta,self}, Entry};
+use crate::inscription_entries::InscriptionId;
+use crate::inscription_entries::{inscription::InscriptionMeta, Entry};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
-    BlockStatus, BoolThen, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
+    BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
 };
 use crate::{db_key, errors::*};
 
@@ -138,10 +134,9 @@ impl Store {
             .header_by_blockhash(&hash)
             .map(|x| x.height())
     }
-
 }
 
-type UtxoMap = HashMap<OutPoint, (BlockId, Value, Option<InscriptionId>)>;
+type UtxoMap = HashMap<OutPoint, (BlockId, Value, Option<InscriptionId>, Option<Address>)>;
 
 #[derive(Debug)]
 pub struct Utxo {
@@ -154,6 +149,7 @@ pub struct Utxo {
     pub content_length: Option<usize>,
     pub outpoint: Option<Txid>,
     pub genesis: Option<Txid>,
+    pub address: Option<Address>,
 }
 
 impl From<&Utxo> for OutPoint {
@@ -371,7 +367,7 @@ impl Indexer {
         Ok(result)
     }
 
-    pub fn update(&mut self, daemon: &Daemon, store: Arc<Store>) -> Result<BlockHash> {
+    pub fn update(&mut self, daemon: &Daemon) -> Result<BlockHash> {
         let daemon = daemon.reconnect()?;
         let tip = daemon.getbestblockhash()?;
         let new_headers = self.get_new_headers(&daemon, &tip)?;
@@ -383,7 +379,7 @@ impl Indexer {
             to_add.len(),
             self.from
         );
-        start_fetcher(self.from, &daemon, to_add)?.map(|blocks| self.add(&blocks, store.clone()));
+        start_fetcher(self.from, &daemon, to_add)?.map(|blocks| self.add(&blocks));
         self.start_auto_compactions(&self.store.txstore_db);
 
         let to_index = self.headers_to_index(&new_headers);
@@ -419,12 +415,12 @@ impl Indexer {
         Ok(tip)
     }
 
-    fn add(&self, blocks: &[BlockEntry], store: Arc<Store>) {
+    fn add(&self, blocks: &[BlockEntry]) {
         debug!("Adding {} blocks to Indexer", blocks.len());
         // TODO: skip orphaned blocks?
         let rows = {
             let _timer = self.start_timer("add_process");
-            add_blocks(blocks, &self.iconfig, store.clone())
+            add_blocks(blocks, &self.iconfig)
         };
         {
             let _timer = self.start_timer("add_write");
@@ -723,7 +719,7 @@ impl ChainQuery {
         // format as Utxo objects
         Ok(newutxos
             .into_iter()
-            .map(|(outpoint, (blockid, value, inscription_id))| {
+            .map(|(outpoint, (blockid, value, inscription_id, address))| {
                 // in elements/liquid chains, we have to lookup the txo in order to get its
                 // associated asset. the asset information could be kept in the db history rows
                 // alongside the value to avoid this.
@@ -740,6 +736,7 @@ impl ChainQuery {
                     content_type: None,
                     genesis: None,
                     outpoint: None,
+                    address,
 
                     #[cfg(feature = "liquid")]
                     asset: txo.asset,
@@ -787,7 +784,10 @@ impl ChainQuery {
                         .get(&db_key!(TXID_IS_INSCRIPTION, &info.txid))
                         .is_some();
                     if !is_inscription {
-                        utxos.insert(history.get_funded_outpoint(), (blockid, info.value, None));
+                        utxos.insert(
+                            history.get_funded_outpoint(),
+                            (blockid, info.value, None, None),
+                        );
                     }
                 }
                 TxHistoryInfo::Spending(_) => {
@@ -814,29 +814,29 @@ impl ChainQuery {
 
     pub fn new_ords(&self, limit: usize) -> Result<Vec<(String, InscriptionMeta)>> {
         let prefix = TXID_IS_INSCRIPTION.as_bytes();
-        let iter = self.store
+        let iter = self
+            .store
             .inscription_db()
             .raw_rev_iter(prefix)
             .take(limit)
-            .map(|x|{
-                x.map(|x|(x.0[prefix.len()..].to_vec(),x.1.to_vec()))
-            })
-            .map(|x|
-                x.map(|(txid,genesis_owner)|{ 
+            .map(|x| x.map(|x| (x.0[prefix.len()..].to_vec(), x.1.to_vec())))
+            .map(|x| {
+                x.map(|(_, genesis_owner)| {
                     let (genesis, owner) = genesis_owner.split_at(32);
-                    (txid,genesis.to_vec(),owner.to_vec())
+                    (genesis.to_vec(), owner.to_vec())
                 })
-            );
-        
+            });
+
         let mut ords = vec![];
         for txid_genesis_owner in iter {
-            let (txid, genesis, owner) = txid_genesis_owner.anyhow()?;
-            let raw_meta = self.store.inscription_db()
+            let (genesis, owner) = txid_genesis_owner.anyhow()?;
+            let raw_meta = self
+                .store
+                .inscription_db()
                 .get(&db_key!(INSCRIPTION_ID_TO_META, &genesis))
                 .anyhow()?;
             let meta = InscriptionMeta::from_bytes(&raw_meta).anyhow()?;
-            let owner = String::from_utf8(owner.to_vec())
-                .anyhow_as("Owner problem :(")?;
+            let owner = String::from_utf8(owner.to_vec()).anyhow_as("Owner problem :(")?;
             // let inscription_id = InscriptionId {
             //     txid: Txid::from_slice(&raw_inscription_id[..32]).anyhow()?,
             //     index: u32::from_be_bytes(raw_inscription_id[32..].try_into().anyhow()?),
@@ -846,11 +846,11 @@ impl ChainQuery {
             // let owner = tx.output.first().unwrap().script_pubkey.clone();
             //Network::
             //if owner.is_p2pk() { owner.to_address_str(network)}
-            
+
             //let owner = Address::from_script(&owner, bitcoin::network::constants::Network::Bitcoin).anyhow()?;
             ords.push((owner.to_string(), meta));
         }
-        
+
         Ok(ords)
     }
 
@@ -908,7 +908,7 @@ impl ChainQuery {
         // format as Utxo objects
         Ok(newutxos
             .into_iter()
-            .map(|(outpoint, (blockid, value, inscription_id))| {
+            .map(|(outpoint, (blockid, value, inscription_id, address))| {
                 // in elements/liquid chains, we have to lookup the txo in order to get its
                 // associated asset. the asset information could be kept in the db history rows
                 // alongside the value to avoid this.
@@ -944,6 +944,7 @@ impl ChainQuery {
                         .map(|meta| meta.content_type.clone()),
                     outpoint: inscription_meta.as_ref().map(|meta| meta.outpoint),
                     genesis: inscription_meta.as_ref().map(|meta| meta.genesis),
+                    address,
 
                     #[cfg(feature = "liquid")]
                     asset: txo.asset,
@@ -996,9 +997,25 @@ impl ChainQuery {
                             index: 0,
                         };
 
+                        let address = {
+                            let raw_tx = self
+                                .store
+                                .txstore_db()
+                                .get(&db_key!("T", &info.txid))
+                                .anyhow_as("Failed to get raw tx")?;
+                            let tx = bitcoin::Transaction::consensus_decode(std::io::Cursor::new(
+                                raw_tx,
+                            ))
+                            .anyhow_as("Failed to decode tx")?;
+                            Address::from_script(
+                                &tx.output.first().unwrap().script_pubkey,
+                                bitcoin::network::constants::Network::Bitcoin,
+                            )
+                        };
+
                         utxos.insert(
                             history.get_funded_outpoint(),
-                            (blockid, info.value, Some(inscription_id)),
+                            (blockid, info.value, Some(inscription_id), address),
                         );
                     }
                 }
@@ -1060,9 +1077,24 @@ impl ChainQuery {
                                 .anyhow_as("Txid parse problem")?,
                             index: 0,
                         };
+                        let address = {
+                            let raw_tx = self
+                                .store
+                                .txstore_db()
+                                .get(&db_key!("T", &info.txid))
+                                .anyhow_as("Failed to get raw tx")?;
+                            let tx = bitcoin::Transaction::consensus_decode(std::io::Cursor::new(
+                                raw_tx,
+                            ))
+                            .anyhow_as("Failed to decode tx")?;
+                            Address::from_script(
+                                &tx.output.first().unwrap().script_pubkey,
+                                bitcoin::network::constants::Network::Bitcoin,
+                            )
+                        };
                         utxos.insert(
                             history.get_funded_outpoint(),
-                            (blockid, info.value, Some(inscription_id)),
+                            (blockid, info.value, Some(inscription_id), address),
                         );
                     }
                 }
@@ -1090,15 +1122,22 @@ impl ChainQuery {
         Ok((utxos, lastblock, processed_items))
     }
 
-    pub fn ords_utxo(&self, scripthash: &[u8], ords_utxo: &mut UtxoMap, searcher: &OrdsSearcher,) -> Result<(UtxoMap, Option<BlockHash>, usize)> {
+    pub fn ords_utxo(
+        &self,
+        scripthash: &[u8],
+        ords_utxo: &mut UtxoMap,
+        searcher: &OrdsSearcher,
+    ) -> Result<(UtxoMap, Option<BlockHash>, usize)> {
         let _timer = self.start_timer("ords_utxo");
 
         match searcher {
             OrdsSearcher::After(last_seen_txid, limit) => {
-                let height = self.tx_confirming_block(last_seen_txid)
-                .anyhow_as("No block height")?
-                .height;
-                let history_iter = self.history_iter_scan(b'H', scripthash, height)
+                let height = self
+                    .tx_confirming_block(last_seen_txid)
+                    .anyhow_as("No block height")?
+                    .height;
+                let history_iter = self
+                    .history_iter_scan(b'H', scripthash, height)
                     .map(TxHistoryRow::from_row)
                     .skip_while(|history| last_seen_txid != &history.get_txid()) // skip until we reach the last_seen_txid
                     .skip(1); // skip last_seen_txid
@@ -1452,11 +1491,7 @@ fn load_blockheaders(db: &DB) -> HashMap<BlockHash, BlockHeader> {
         .collect()
 }
 
-fn add_blocks(
-    block_entries: &[BlockEntry],
-    iconfig: &IndexerConfig,
-    store: Arc<Store>,
-) -> Vec<DBRow> {
+fn add_blocks(block_entries: &[BlockEntry], iconfig: &IndexerConfig) -> Vec<DBRow> {
     // persist individual transactions:
     //      T{txid} → {rawtx}
     //      C{txid}{blockhash}{height} →
@@ -2091,7 +2126,7 @@ impl StatsCacheRow {
     }
 }
 
-type CachedUtxoMap = HashMap<(Txid, u32), (u32, Value, Option<InscriptionId>)>; // (txid,vout) => (block_height,output_value)
+type CachedUtxoMap = HashMap<(Txid, u32), (u32, Value, Option<InscriptionId>, Option<Address>)>; // (txid,vout) => (block_height,output_value)
 
 struct UtxoCacheRow {
     key: ScriptCacheKey,
@@ -2128,10 +2163,10 @@ impl UtxoCacheRow {
 fn make_utxo_cache(utxos: &UtxoMap) -> CachedUtxoMap {
     utxos
         .iter()
-        .map(|(outpoint, (blockid, value, ord))| {
+        .map(|(outpoint, (blockid, value, ord, address))| {
             (
                 (outpoint.txid, outpoint.vout),
-                (blockid.height as u32, *value, *ord),
+                (blockid.height as u32, *value, *ord, address.clone()),
             )
         })
         .collect()
@@ -2140,12 +2175,12 @@ fn make_utxo_cache(utxos: &UtxoMap) -> CachedUtxoMap {
 fn from_utxo_cache(utxos_cache: CachedUtxoMap, chain: &ChainQuery) -> UtxoMap {
     utxos_cache
         .into_iter()
-        .map(|((txid, vout), (height, value, ord))| {
+        .map(|((txid, vout), (height, value, ord, address))| {
             let outpoint = OutPoint { txid, vout };
             let blockid = chain
                 .blockid_by_height(height as usize)
                 .expect("missing blockheader for valid utxo cache entry");
-            (outpoint, (blockid, value, ord))
+            (outpoint, (blockid, value, ord, address))
         })
         .collect()
 }

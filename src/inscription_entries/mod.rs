@@ -1,36 +1,38 @@
-use core::fmt;
-use std::{fmt::{Display, Formatter}, io, str::FromStr, ops::{Add, AddAssign}, cmp};
 use anyhow::{anyhow, Error, Result};
-use serde::{Deserialize, Serialize, Deserializer, Serializer};
-use bitcoin::{BlockHash, OutPoint, consensus::{Encodable, Decodable}, Txid};
+use bitcoin::{
+    consensus::{Decodable, Encodable},
+    BlockHash, OutPoint, Txid,
+};
+use core::fmt;
 use derive_more::Display;
-
-pub(crate) use self::{
-    deserialize_from_str::DeserializeFromStr, 
-    entry::{
-        Entry,
-        OutPointValue,
-        SatPointValue
-    }, 
-    inscription_id::InscriptionId, 
-    sat::Sat, 
-    height::Height, 
-    epoch::Epoch, 
-    sat_point::SatPoint, 
-    inscription::{
-        Inscription, 
-        ParsedInscription
-    }
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::{
+    cmp,
+    fmt::{Display, Formatter},
+    io,
+    ops::{Add, AddAssign},
+    str::FromStr,
 };
 
-pub mod sat;
-pub mod height;
-pub mod epoch;
-pub mod inscription_id;
-pub mod entry;
+pub(crate) use self::{
+    deserialize_from_str::DeserializeFromStr,
+    entry::{Entry, OutPointValue},
+    epoch::Epoch,
+    height::Height,
+    inscription::{Inscription, ParsedInscription},
+    inscription_id::InscriptionId,
+    sat::Sat,
+    sat_point::SatPoint,
+};
+
+pub mod decimal;
 pub mod deserialize_from_str;
-pub mod sat_point;
+pub mod entry;
+pub mod epoch;
+pub mod height;
 pub mod index;
 pub mod inscription;
-pub mod decimal;
+pub mod inscription_id;
 pub mod rarity;
+pub mod sat;
+pub mod sat_point;
