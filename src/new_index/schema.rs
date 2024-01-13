@@ -812,34 +812,43 @@ impl ChainQuery {
         Ok((utxos, lastblock, processed_items))
     }
 
-    pub fn new_ords(&self, limit: usize) -> Result<Vec<(String ,InscriptionId, InscriptionMeta)>> {
-        let prefix = INSCRIPTION_ID_TO_TXIDS.as_bytes();
+    pub fn new_ords(&self, limit: usize) -> Result<Vec<(String, InscriptionMeta)>> {
+        let prefix = TXID_IS_INSCRIPTION.as_bytes();
         let iter = self.store
             .inscription_db()
             .raw_rev_iter(prefix)
             .take(limit)
-            .map(|x| x.map(|x| x.0[prefix.len()..].to_vec()));
+            .map(|x|{
+                x.map(|x|(x.0[prefix.len()..].to_vec(),x.1.to_vec()))
+            })
+            .map(|x|
+                x.map(|(txid,genesis_owner)|{ 
+                    let (genesis, owner) = genesis_owner.split_at(32);
+                    (txid,genesis.to_vec(),owner.to_vec())
+                })
+            );
         
         let mut ords = vec![];
-        for key in iter {
-            let raw_inscription_id = key.anyhow()?;
+        for txid_genesis_owner in iter {
+            let (txid, genesis, owner) = txid_genesis_owner.anyhow()?;
             let raw_meta = self.store.inscription_db()
-                .get(&db_key!(INSCRIPTION_ID_TO_META,&raw_inscription_id))
+                .get(&db_key!(INSCRIPTION_ID_TO_META, &genesis))
                 .anyhow()?;
             let meta = InscriptionMeta::from_bytes(&raw_meta).anyhow()?;
-
-            let inscription_id = InscriptionId {
-                txid: Txid::from_slice(&raw_inscription_id[..32]).anyhow()?,
-                index: u32::from_be_bytes(raw_inscription_id[32..].try_into().anyhow()?),
-            };
-            let tx = self.store.txstore_db().get(&db_key!("T", &raw_inscription_id[..32])).anyhow()?;
-            let tx = bitcoin::Transaction::consensus_decode(std::io::Cursor::new(tx)).anyhow()?;
-            let owner = tx.output.first().unwrap().script_pubkey.clone();
+            let owner = String::from_utf8(owner.to_vec())
+                .anyhow_as("Owner problem :(")?;
+            // let inscription_id = InscriptionId {
+            //     txid: Txid::from_slice(&raw_inscription_id[..32]).anyhow()?,
+            //     index: u32::from_be_bytes(raw_inscription_id[32..].try_into().anyhow()?),
+            // };
+            // let tx = self.store.txstore_db().get(&db_key!("T", &raw_inscription_id[..32])).anyhow()?;
+            // let tx = bitcoin::Transaction::consensus_decode(std::io::Cursor::new(tx)).anyhow()?;
+            // let owner = tx.output.first().unwrap().script_pubkey.clone();
             //Network::
             //if owner.is_p2pk() { owner.to_address_str(network)}
             
-            let owner = Address::from_script(&owner, bitcoin::network::constants::Network::Bitcoin).anyhow()?;
-            ords.push((owner.to_string(), inscription_id, meta));
+            //let owner = Address::from_script(&owner, bitcoin::network::constants::Network::Bitcoin).anyhow()?;
+            ords.push((owner.to_string(), meta));
         }
         
         Ok(ords)
@@ -983,7 +992,7 @@ impl ChainQuery {
 
                     if let Some(v) = genesis_ord {
                         let inscription_id = InscriptionId {
-                            txid: Txid::from_slice(&v).anyhow_as("Txid parse problem")?,
+                            txid: Txid::from_slice(&v[..32]).anyhow_as("Txid parse problem")?,
                             index: 0,
                         };
 
@@ -1045,9 +1054,9 @@ impl ChainQuery {
                         .store
                         .inscription_db()
                         .get(&db_key!(TXID_IS_INSCRIPTION, &info.txid));
-                    if let Some(genesis_txid) = genesis_ord {
+                    if let Some(genesis) = genesis_ord {
                         let inscription_id = InscriptionId {
-                            txid: Txid::from_slice(&genesis_txid)
+                            txid: Txid::from_slice(&genesis[..32])
                                 .anyhow_as("Txid parse problem")?,
                             index: 0,
                         };
