@@ -105,7 +105,7 @@ impl<'a> InscriptionUpdater<'a> {
                     //info!("Ord was move from:{:?} to:{:?}", prev_tx.to_hex(), txid.to_hex() );
                     store
                         .inscription_db()
-                        .put(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.into_inner()), &shit)
+                        .put(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), &shit)
                 };
             }
 
