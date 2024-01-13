@@ -1,30 +1,21 @@
-use bitcoin::{consensus::Encodable, hashes::hex::ToHex, TxIn};
-use itertools::Itertools;
-use std::{
-    collections::{HashMap, VecDeque},
-    convert::TryInto,
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use crate::{
     db_key,
     inscription_entries::{
-        entry::{Entry, InscriptionEntry},
+        entry::Entry,
         height::Height,
-        index::{
-            InscriptionIndex, INSCRIPTION_ID_TO_META, INSCRIPTION_ID_TO_TXIDS, NUMBER_TO_ID,
-            TXID_IS_INSCRIPTION,
-        },
+        index::{INSCRIPTION_ID_TO_META, INSCRIPTION_ID_TO_TXIDS, TXID_IS_INSCRIPTION},
         inscription::Inscription,
-        inscription::ParsedInscription,
+        inscription::{InscriptionMeta, ParsedInscription},
         inscription_id::InscriptionId,
-        Sat, SatPoint,
+        SatPoint,
     },
     util::errors::AsAnyhow,
 };
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use bitcoin::consensus::Decodable;
-use bitcoin::{hashes::Hash, OutPoint, Transaction, Txid};
+use bitcoin::{hashes::Hash, Transaction, Txid};
 
 use super::{Store, DB};
 
@@ -42,68 +33,22 @@ enum Origin {
 }
 
 pub(crate) struct InscriptionUpdater<'a> {
-    flotsam: Vec<Flotsam>,
     height: u64,
-    id_to_satpoint: &'a str,
-    id_to_txids: &'a str,
-    txid_to_tx: &'a str,
     partial_txid_to_txids: &'a str,
-    id_to_entry: &'a str,
-    lost_sats: u64,
-    next_number: u64,
-    number_to_id: &'a str,
-    outpoint_to_value: &'a str,
     reward: u64,
-    sat_to_inscription_id: &'a str,
-    timestamp: u32,
-    value_cache: &'a parking_lot::RwLock<HashMap<OutPoint, u64>>,
     database: &'a DB,
 }
 
 impl<'a> InscriptionUpdater<'a> {
     pub(crate) fn new(
         height: u64,
-        id_to_satpoint: &'a str,
-        id_to_txids: &'a str,
-        txid_to_tx: &'a str,
         partial_txid_to_txids: &'a str,
-        id_to_entry: &'a str,
-        lost_sats: u64,
-        number_to_id: &'a str,
-        outpoint_to_value: &'a str,
-        sat_to_inscription_id: &'a str,
-        timestamp: u32,
-        value_cache: &'a parking_lot::RwLock<HashMap<OutPoint, u64>>,
         database: &'a DB,
     ) -> Result<Self> {
-        let next_number = database
-            .iter_scan(NUMBER_TO_ID.as_bytes())
-            .map(|dbrow| {
-                dbrow
-                    .value
-                    .try_into()
-                    .map(|x| u64::from_le_bytes(x) + 1)
-                    .unwrap_or(0)
-            })
-            .next()
-            .unwrap_or(0);
-
         Ok(Self {
-            flotsam: Vec::new(),
             height,
-            id_to_satpoint,
-            id_to_txids,
-            txid_to_tx,
             partial_txid_to_txids,
-            id_to_entry,
-            lost_sats,
-            next_number,
-            number_to_id,
-            outpoint_to_value,
             reward: Height(height).subsidy(),
-            sat_to_inscription_id,
-            timestamp,
-            value_cache,
             database,
         })
     }
@@ -113,55 +58,7 @@ impl<'a> InscriptionUpdater<'a> {
         store: Arc<Store>,
         tx: &Transaction,
         txid: Txid,
-        input_sat_ranges: Option<&VecDeque<(u128, u128)>>,
-    ) -> Result<(u64, bool)> {
-        let mut inscriptions = Vec::new();
-        let mut is_inscription = false;
-
-        //let mut writer = vec![];
-        //tx.consensus_encode(&mut writer)?;
-        //store.inscription_db().put(&db_key!("T", &txid.into_inner()), &writer);
-
-        // let mut input_value = 0;
-        // for tx_in in &tx.input {
-        //     if tx_in.previous_output.is_null() {
-        //         input_value += Height(self.height).subsidy();
-        //     } else {
-        //         let prev_tx = store.txstore_db().get(&db_key!("T", &tx_in.previous_output.txid.into_inner())).anyhow()?;
-        //         let tx_buf = prev_tx;
-        //         let mut cursor = std::io::Cursor::new(tx_buf);
-        //         let tx = bitcoin::Transaction::consensus_decode(&mut cursor)?;
-        //         tx.input
-        //         for bibas in
-        //             InscriptionIndex::inscriptions_on_output(self.database, tx_in.previous_output)
-        //                 .track_err()?
-        //         {
-        //             let (old_satpoint, inscription_id) = bibas.track_err()?;
-
-        //             inscriptions.push(Flotsam {
-        //                 offset: input_value + old_satpoint.offset,
-        //                 inscription_id,
-        //                 origin: Origin::Old(old_satpoint),
-        //             });
-        //         }
-
-        //         input_value +=
-        //             if let Some(value) = self.value_cache.write().remove(&tx_in.previous_output) {
-        //                 value
-        //             } else if let Some(value) = self.database.remove(&db_key!(
-        //                 self.outpoint_to_value,
-        //                 &tx_in.previous_output.store().track_err()?
-        //             )) {
-        //                 u64::from_le_bytes(value.try_into().track_err()?)
-        //             } else {
-        //                 return Err(anyhow!(
-        //                     "failed to get transaction for {}",
-        //                     tx_in.previous_output.txid
-        //                 ));
-        //             }
-        //     }
-        // }
-
+    ) -> Result<u64> {
         let previous_txid = tx.input[0].previous_output.txid;
         let previous_txid_bytes: [u8; 32] = previous_txid.into_inner();
         let mut txids_vec = vec![];
@@ -252,139 +149,25 @@ impl<'a> InscriptionUpdater<'a> {
                     ),
                     &txids_vec,
                 );
+
+                store.inscription_db().put(
+                    &db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()),
+                    &txs.first().anyhow_as("BIG COCKS")?.txid().into_inner(),
+                );
+
+                let inscription_meta = InscriptionMeta::new(
+                    _inscription.content_type().unwrap().to_owned(),
+                    _inscription.content_length().unwrap(),
+                    og_inscription_id.txid,
+                    og_inscription_id.txid,
+                );
+
                 store.inscription_db().put(
                     &db_key!(INSCRIPTION_ID_TO_META, &og_inscription_id.store().anyhow()?),
-                    &_inscription
-                        .into_body()
-                        .anyhow_as("Failed to move inscription struct into body")?,
+                    &inscription_meta.into_bytes()?,
                 );
-
-                inscriptions.push(Flotsam {
-                    inscription_id: og_inscription_id,
-                    offset: 0,
-                    origin: Origin::New(
-                        0, //input_value - tx.output.iter().map(|txout| txout.value).sum::<u64>(),
-                    ),
-                });
-                is_inscription = true;
             }
         }
-
-        let clone_govna = inscriptions.clone().into_iter().peekable();
-        let mut inscriptions = inscriptions.into_iter().peekable();
-
-        let mut output_value = 0;
-        for (vout, tx_out) in tx.output.iter().enumerate() {
-            output_value += tx_out.value;
-        }
-
-        if is_inscription {
-            store.inscription_db().put(
-                &db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()),
-                &txs.first().anyhow_as("BIG COCKS")?.txid().into_inner(),
-            );
-        }
-
-        if false {
-            for flotsam in inscriptions {
-                let new_satpoint = SatPoint {
-                    outpoint: OutPoint::null(),
-                    offset: self.lost_sats + flotsam.offset - output_value,
-                };
-                self.update_inscription_location(input_sat_ranges, flotsam, new_satpoint)?;
-            }
-
-            Ok((self.reward - output_value, is_inscription))
-        } else {
-            // let reward = self.reward;
-            // self.flotsam.extend(inscriptions.map(|flotsam| Flotsam {
-            //     offset: reward + flotsam.offset,
-            //     ..flotsam
-            // }));
-            // self.reward += input_value - output_value;
-            Ok((0, is_inscription))
-        }
+        Ok(0)
     }
-
-    fn update_inscription_location(
-        &mut self,
-        input_sat_ranges: Option<&VecDeque<(u128, u128)>>,
-        flotsam: Flotsam,
-        new_satpoint: SatPoint,
-    ) -> Result<()> {
-        let inscription_id = flotsam.inscription_id.store().track_err()?;
-
-        match flotsam.origin {
-            Origin::Old(old_satpoint) => {
-                self.database.remove(&db_key!(
-                    self.sat_to_inscription_id,
-                    &old_satpoint.store().track_err()?
-                ));
-            }
-            Origin::New(fee) => {
-                self.database.put(
-                    &db_key!(self.number_to_id, &self.next_number.to_be_bytes()),
-                    inscription_id.as_slice(),
-                );
-
-                let mut sat = None;
-                if let Some(input_sat_ranges) = input_sat_ranges {
-                    let mut offset = 0;
-                    for (start, end) in input_sat_ranges {
-                        let size = end - start;
-                        if offset + size > flotsam.offset as u128 {
-                            let n = start + flotsam.offset as u128 - offset;
-                            self.database.put(
-                                &db_key!(self.sat_to_inscription_id, &n.to_be_bytes()),
-                                inscription_id.as_slice(),
-                            );
-                            sat = Some(Sat(n));
-                            break;
-                        }
-                        offset += size;
-                    }
-                }
-
-                self.database.put(
-                    &db_key!(self.id_to_entry, &inscription_id),
-                    &tuple_to_bytes(
-                        &InscriptionEntry {
-                            fee,
-                            height: self.height,
-                            number: self.next_number,
-                            sat,
-                            timestamp: self.timestamp,
-                        }
-                        .store()
-                        .track_err()?,
-                    ),
-                );
-
-                self.next_number += 1;
-            }
-        }
-
-        let new_satpoint = new_satpoint.store().track_err()?;
-
-        self.database.put(
-            &db_key!(self.sat_to_inscription_id, &new_satpoint),
-            inscription_id.as_slice(),
-        );
-        self.database.put(
-            &db_key!(self.id_to_satpoint, &inscription_id),
-            new_satpoint.as_slice(),
-        );
-
-        Ok(())
-    }
-}
-
-fn tuple_to_bytes(tup: &(u64, u64, u64, u128, u32)) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&tup.0.to_le_bytes());
-    bytes.extend_from_slice(&tup.1.to_le_bytes());
-    bytes.extend_from_slice(&tup.2.to_le_bytes());
-    bytes.extend_from_slice(&tup.3.to_le_bytes());
-    bytes.extend_from_slice(&tup.4.to_le_bytes());
-    bytes
 }

@@ -1,18 +1,19 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
-use crate::inscription_entries::index::TXID_IS_INSCRIPTION;
-use crate::new_index::db::DBFlush;
-use crate::new_index::schema::OrdsSearcher;
-use crate::{errors, db_key};
-use crate::new_index::exchange_data::get_bells_price;
+use crate::inscription_entries::index::{INSCRIPTION_ID_TO_META, TXID_IS_INSCRIPTION};
+use crate::inscription_entries::inscription::InscriptionMeta;
 use crate::inscription_entries::InscriptionId;
+use crate::new_index::db::DBFlush;
+use crate::new_index::exchange_data::get_bells_price;
+use crate::new_index::schema::OrdsSearcher;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
-use crate::util::errors::{UnwrapPrint, AsAnyhow};
+use crate::util::errors::UnwrapPrint;
 use crate::util::{
     create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
     has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
     ScriptToAddr, ScriptToAsm, TransactionStatus,
 };
+use crate::{db_key, errors};
 
 use {bitcoin::consensus::encode, std::str::FromStr};
 
@@ -40,7 +41,6 @@ use std::thread;
 use url::form_urlencoded;
 
 const ADDRESS_SEARCH_LIMIT: usize = 10;
-
 
 const TTL_LONG: u32 = 157_784_630; // ttl for static resources (5 years)
 const TTL_SHORT: u32 = 10; // ttl for volatie resources
@@ -190,7 +190,6 @@ struct TxInValue {
     inner_redeemscript_asm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inner_witnessscript_asm: Option<String>,
-
 }
 
 impl TxInValue {
@@ -241,7 +240,6 @@ struct TxOutValue {
     scriptpubkey_address: Option<String>,
 
     value: u64,
-
 }
 
 impl TxOutValue {
@@ -443,7 +441,6 @@ async fn run_server(config: Arc<Config>, query: Arc<Query>, rx: oneshot::Receive
             }
         });
     }
-    
 
     let server = match socket_file {
         None => {
@@ -564,7 +561,10 @@ fn handle_request(
             let blockhm = query
                 .chain()
                 .get_block_with_meta(&hash)
-                .map_err(|e| { Err::<(),_>(e).catch("Block not found"); HttpError::not_found("Block not found".to_string()) })?
+                .map_err(|e| {
+                    Err::<(), _>(e).catch("Block not found");
+                    HttpError::not_found("Block not found".to_string())
+                })?
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
             let block_value = BlockValue::new(blockhm);
             json_response(block_value, TTL_LONG)
@@ -580,7 +580,10 @@ fn handle_request(
             let txids = query
                 .chain()
                 .get_block_txids(&hash)
-                .map_err(|e| { Err::<(),_>(e).catch("Block not found"); HttpError::not_found("Block not found".to_string()) })?
+                .map_err(|e| {
+                    Err::<(), _>(e).catch("Block not found");
+                    HttpError::not_found("Block not found".to_string())
+                })?
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
             json_response(txids, TTL_LONG)
         }
@@ -606,6 +609,17 @@ fn handle_request(
             let header_hex = hex::encode(encode::serialize(&header));
             http_message(StatusCode::OK, header_hex, TTL_LONG)
         }
+        (&Method::GET, Some(&"ord"), Some(hash), None, None, None) => {
+            let inscription_meta = query
+                .chain()
+                .store()
+                .inscription_db()
+                .get(&db_key!(INSCRIPTION_ID_TO_META, &hash.as_bytes()))
+                .map(|x| InscriptionMeta::from_bytes(&x))
+                .unwrap()
+                .unwrap();
+            json_response(inscription_meta, TTL_LONG)
+        }
         (&Method::GET, Some(&"block"), Some(hash), Some(&"raw"), None, None) => {
             let hash = BlockHash::from_hex(hash)?;
             let raw = query
@@ -627,7 +641,10 @@ fn handle_request(
             let txids = query
                 .chain()
                 .get_block_txids(&hash)
-                .map_err(|e| { Err::<(),_>(e).catch("Block not found"); HttpError::not_found("Block not found".to_string()) })?
+                .map_err(|e| {
+                    Err::<(), _>(e).catch("Block not found");
+                    HttpError::not_found("Block not found".to_string())
+                })?
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
             if index >= txids.len() {
                 bail!(HttpError::not_found("tx index out of range".to_string()));
@@ -639,7 +656,10 @@ fn handle_request(
             let txids = query
                 .chain()
                 .get_block_txids(&hash)
-                .map_err(|e| { Err::<(),_>(e).catch("Block not found"); HttpError::not_found("Block not found".to_string()) })?
+                .map_err(|e| {
+                    Err::<(), _>(e).catch("Block not found");
+                    HttpError::not_found("Block not found".to_string())
+                })?
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
 
             let start_index = start_index
@@ -736,13 +756,12 @@ fn handle_request(
                 }
             }
 
-            match query.mempool().history(&script_hash[..], after_txid.as_ref(), max_txs) {
+            match query
+                .mempool()
+                .history(&script_hash[..], after_txid.as_ref(), max_txs)
+            {
                 Ok(mempool_txs) => {
-                    txs.extend(
-                        mempool_txs
-                            .into_iter()
-                            .map(|tx| (tx, None)),
-                    );
+                    txs.extend(mempool_txs.into_iter().map(|tx| (tx, None)));
                 }
                 Err(e) => {
                     return Err(HttpError(
@@ -751,7 +770,6 @@ fn handle_request(
                     ));
                 }
             }
-
 
             if txs.len() < max_txs {
                 let after_txid_ref = if !txs.is_empty() {
@@ -762,7 +780,10 @@ fn handle_request(
                     after_txid.as_ref()
                 };
 
-                match query.chain().history(&script_hash[..], after_txid_ref, max_txs - txs.len()) {
+                match query
+                    .chain()
+                    .history(&script_hash[..], after_txid_ref, max_txs - txs.len())
+                {
                     Ok(mempool_txs) => {
                         txs.extend(
                             mempool_txs
@@ -805,31 +826,37 @@ fn handle_request(
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_default_chain_txs_per_page);
 
-            let txs = match query.chain().history(&script_hash[..], last_seen_txid.as_ref(), max_txs) {
-                Ok(txs) => {
-                    txs.into_iter()
+            let txs =
+                match query
+                    .chain()
+                    .history(&script_hash[..], last_seen_txid.as_ref(), max_txs)
+                {
+                    Ok(txs) => txs
+                        .into_iter()
                         .map(|(tx, blockid)| (tx, Some(blockid)))
-                        .collect()
-                }
-                Err(e) => {
-                    return Err(HttpError(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        format!("{e:?}"),
-                    ));
-                }
-            };
-
+                        .collect(),
+                    Err(e) => {
+                        return Err(HttpError(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("{e:?}"),
+                        ));
+                    }
+                };
 
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
         }
         // todo update md
         (&Method::GET, Some(&"ord"), Some(&"txid"), Some(txid), None, None) => {
-
             let txid = Txid::from_str(txid).unwrap();
-            let genesis = query.chain().store().inscription_db().get(&db_key!(TXID_IS_INSCRIPTION,&txid.into_inner())).map(|x|
-                Txid::from_slice(&x)
-            ).unwrap().unwrap();
-            
+            let genesis = query
+                .chain()
+                .store()
+                .inscription_db()
+                .get(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()))
+                .map(|x| Txid::from_slice(&x))
+                .unwrap()
+                .unwrap();
+
             http_message(StatusCode::OK, genesis.to_hex(), TTL_LONG)
         }
         // todo update md
@@ -851,18 +878,15 @@ fn handle_request(
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
             let Some(last_seen_txid) = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok())
-            else { 
-                let msg = last_seen_txid.map_or(
-                    "txid is empty".to_owned(),
-                    |x| format!("txid is wrong {}",x)
-                );
-                return Err(HttpError(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    msg,
-                ));
+            else {
+                let msg = last_seen_txid.map_or("txid is empty".to_owned(), |x| {
+                    format!("txid is wrong {}", x)
+                });
+                return Err(HttpError(StatusCode::UNPROCESSABLE_ENTITY, msg));
             };
             let searcher = OrdsSearcher::After(last_seen_txid, query.config().utxos_limit);
-            let ords: Vec<UtxoValue> = query.chain()
+            let ords: Vec<UtxoValue> = query
+                .chain()
                 .ords(&script_hash[..], &searcher, DBFlush::Enable)?
                 .into_iter()
                 .map(UtxoValue::from)
@@ -893,12 +917,7 @@ fn handle_request(
                 .unwrap_or(config.rest_default_max_mempool_txs);
 
             let txs = match query.mempool().history(&script_hash[..], None, max_txs) {
-                Ok(txs) => {
-                    txs
-                        .into_iter()
-                        .map(|tx| (tx, None))
-                        .collect()
-                }
+                Ok(txs) => txs.into_iter().map(|tx| (tx, None)).collect(),
                 Err(e) => {
                     return Err(HttpError(
                         StatusCode::UNPROCESSABLE_ENTITY,
@@ -956,7 +975,9 @@ fn handle_request(
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
             let page = from_str::<usize>(page).map_err(|_| "Page is incorrect".to_owned())?;
-            if page == 0 { Err("Page is incorrect".to_owned())?; } 
+            if page == 0 {
+                Err("Page is incorrect".to_owned())?;
+            }
             let searcher = OrdsSearcher::Pagination(page, query.config().utxos_limit);
             let utxos: Vec<UtxoValue> = query
                 .chain()
@@ -1217,17 +1238,21 @@ fn handle_request(
         }
 
         (&Method::GET, Some(&"coin"), Some(&"BELLS"), None, None, None) => {
-            #[derive(serde::Serialize)] struct J {
+            #[derive(serde::Serialize)]
+            struct J {
                 ticker: String,
                 price_usd: Option<f64>,
             }
 
             let bells_usd = query.exchange_data.lock().bells_price;
 
-            json_response(J {
-                ticker: "BELLS".to_owned(),
-                price_usd: bells_usd,
-            }, TTL_SHORT)
+            json_response(
+                J {
+                    ticker: "BELLS".to_owned(),
+                    price_usd: bells_usd,
+                },
+                TTL_SHORT,
+            )
         }
 
         _ => Err(HttpError::not_found(format!(
@@ -1301,7 +1326,10 @@ fn blocks(
         let blockhm = query
             .chain()
             .get_block_with_meta(&current_hash)
-            .map_err(|e| { Err::<(),_>(e).catch("Block not found"); HttpError::not_found("Block not found".to_string()) })?
+            .map_err(|e| {
+                Err::<(), _>(e).catch("Block not found");
+                HttpError::not_found("Block not found".to_string())
+            })?
             .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
         current_hash = blockhm.header_entry.header().prev_blockhash;
 
@@ -1332,14 +1360,12 @@ fn to_scripthash(
 fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpError> {
     let addr = address::Address::from_str(addr)?;
 
-
     let is_expected_net = {
         let addr_network = Network::from(addr.network);
 
         // Testnet, Regtest and Signet all share the same version bytes,
         // `addr_network` will be detected as Testnet for all of them.
-        addr_network == network
-            || (addr_network == Network::Testnet)
+        addr_network == network || (addr_network == Network::Testnet)
     };
 
     if !is_expected_net {
