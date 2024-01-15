@@ -999,7 +999,7 @@ impl ChainQuery {
                             index: 0,
                         };
 
-                        let address = String::from_utf8(genesis[33..].to_vec())
+                        let address = String::from_utf8(genesis[32..].to_vec())
                             .anyhow_as("Address parse problem :(")?;
                         // let address = {
                         //     let raw_tx = self
