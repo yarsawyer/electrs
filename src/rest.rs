@@ -851,23 +851,6 @@ fn handle_request(
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
         }
         // todo update md
-        (&Method::GET, Some(&"ord"), Some(&"txid"), Some(txid), None, None) => {
-            let txid = Txid::from_hex(txid).expect("1");
-            let genesis = query
-                .chain()
-                .store()
-                .inscription_db()
-                .get(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()))
-                .map(|x| {
-                    error!("{:?}", &x);
-                    Txid::from_slice(&x[..32])
-                })
-                .expect("2")
-                .expect("3");
-
-            http_message(StatusCode::OK, genesis.to_hex(), TTL_LONG)
-        }
-        // todo update md
         (
             &Method::GET,
             Some(script_type @ &"address"),
