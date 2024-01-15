@@ -31,7 +31,7 @@ use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricO
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
-    BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
+    BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr, TransactionStatus,
 };
 use crate::{db_key, errors::*};
 
@@ -137,7 +137,7 @@ impl Store {
     }
 }
 
-type UtxoMap = HashMap<OutPoint, (BlockId, Value, Option<InscriptionId>, Option<Address>)>;
+type UtxoMap = HashMap<OutPoint, (BlockId, Value, Option<InscriptionId>, Option<String>)>;
 
 #[derive(Debug)]
 pub struct Utxo {
@@ -150,7 +150,7 @@ pub struct Utxo {
     pub content_length: Option<usize>,
     pub outpoint: Option<Txid>,
     pub genesis: Option<Txid>,
-    pub address: Option<Address>,
+    pub address: Option<String>,
 }
 
 impl From<&Utxo> for OutPoint {
@@ -834,8 +834,6 @@ impl ChainQuery {
                 index: 0,
             };
 
-            error!("{:#?}", inscription_id);
-
             let raw_meta = self
                 .store
                 .inscription_db()
@@ -849,7 +847,13 @@ impl ChainQuery {
             let meta = InscriptionMeta::from_bytes(&raw_meta).anyhow()?;
             let owner = String::from_utf8(owner.to_vec()).anyhow_as("Owner problem :(")?;
 
-            ords.push(Ord { meta, owner });
+            let status = TransactionStatus::from(self.tx_confirming_block(&inscription_id.txid));
+
+            ords.push(Ord {
+                meta,
+                status,
+                owner,
+            });
         }
 
         Ok(ords)
@@ -958,90 +962,6 @@ impl ChainQuery {
             .collect())
     }
 
-    fn ords_delta(
-        &self,
-        scripthash: &[u8],
-        init_utxos: UtxoMap,
-        limit: usize,
-        block_height: usize,
-    ) -> Result<(UtxoMap, Option<BlockHash>, usize)> {
-        let _timer = self.start_timer("utxo_delta");
-        let history_iter = self
-            .history_iter_scan(b'H', scripthash, block_height)
-            .map(TxHistoryRow::from_row)
-            .filter_map(|history| {
-                self.tx_confirming_block(&history.get_txid())
-                    // drop history entries that were previously confirmed in a re-orged block and later
-                    // confirmed again at a different height
-                    .filter(|blockid| blockid.height == history.key.confirmed_height as usize)
-                    .map(|b| (history, b))
-            });
-
-        let mut utxos = init_utxos;
-        let mut processed_items = 0;
-        let mut lastblock = None;
-
-        for (history, blockid) in history_iter {
-            processed_items += 1;
-            lastblock = Some(blockid.hash);
-
-            match history.key.txinfo {
-                TxHistoryInfo::Funding(ref info) => {
-                    let genesis_ord = self
-                        .store
-                        .inscription_db()
-                        .get(&db_key!(TXID_IS_INSCRIPTION, &info.txid));
-
-                    if let Some(v) = genesis_ord {
-                        let inscription_id = InscriptionId {
-                            txid: Txid::from_slice(&v[..32]).anyhow_as("Txid parse problem")?,
-                            index: 0,
-                        };
-
-                        let address = {
-                            let raw_tx = self
-                                .store
-                                .txstore_db()
-                                .get(&db_key!("T", &info.txid))
-                                .anyhow_as("Failed to get raw tx")?;
-                            let tx = bitcoin::Transaction::consensus_decode(std::io::Cursor::new(
-                                raw_tx,
-                            ))
-                            .anyhow_as("Failed to decode tx")?;
-                            Address::from_script(
-                                &tx.output.first().unwrap().script_pubkey,
-                                bitcoin::network::constants::Network::Bitcoin,
-                            )
-                        };
-
-                        utxos.insert(
-                            history.get_funded_outpoint(),
-                            (blockid, info.value, Some(inscription_id), address),
-                        );
-                    }
-                }
-                TxHistoryInfo::Spending(_) => {
-                    utxos.remove(&history.get_funded_outpoint());
-                }
-                #[cfg(feature = "liquid")]
-                TxHistoryInfo::Issuing(_)
-                | TxHistoryInfo::Burning(_)
-                | TxHistoryInfo::Pegin(_)
-                | TxHistoryInfo::Pegout(_) => {
-                    unreachable!();
-                }
-            };
-
-            // abort if the utxo set size excedees the limit at any point in time
-            if utxos.len() > limit {
-                // bail!(ErrorKind::TooPopular)
-                break;
-            }
-        }
-
-        Ok((utxos, lastblock, processed_items))
-    }
-
     fn ords_iter(
         &self,
         cache_utxo: &mut UtxoMap,
@@ -1078,24 +998,27 @@ impl ChainQuery {
                                 .anyhow_as("Txid parse problem")?,
                             index: 0,
                         };
-                        let address = {
-                            let raw_tx = self
-                                .store
-                                .txstore_db()
-                                .get(&db_key!("T", &info.txid))
-                                .anyhow_as("Failed to get raw tx")?;
-                            let tx = bitcoin::Transaction::consensus_decode(std::io::Cursor::new(
-                                raw_tx,
-                            ))
-                            .anyhow_as("Failed to decode tx")?;
-                            Address::from_script(
-                                &tx.output.first().unwrap().script_pubkey,
-                                bitcoin::network::constants::Network::Bitcoin,
-                            )
-                        };
+
+                        let address = String::from_utf8(genesis[33..].to_vec())
+                            .anyhow_as("Address parse problem :(")?;
+                        // let address = {
+                        //     let raw_tx = self
+                        //         .store
+                        //         .txstore_db()
+                        //         .get(&db_key!("T", &info.txid))
+                        //         .anyhow_as("Failed to get raw tx")?;
+                        //     let tx = bitcoin::Transaction::consensus_decode(std::io::Cursor::new(
+                        //         raw_tx,
+                        //     ))
+                        //     .anyhow_as("Failed to decode tx")?;
+                        //     Address::from_script(
+                        //         &tx.output.first().unwrap().script_pubkey,
+                        //         bitcoin::network::constants::Network::Bitcoin,
+                        //     )
+                        // };
                         utxos.insert(
                             history.get_funded_outpoint(),
-                            (blockid, info.value, Some(inscription_id), address),
+                            (blockid, info.value, Some(inscription_id), Some(address)),
                         );
                     }
                 }
@@ -2127,7 +2050,7 @@ impl StatsCacheRow {
     }
 }
 
-type CachedUtxoMap = HashMap<(Txid, u32), (u32, Value, Option<InscriptionId>, Option<Address>)>; // (txid,vout) => (block_height,output_value)
+type CachedUtxoMap = HashMap<(Txid, u32), (u32, Value, Option<InscriptionId>, Option<String>)>; // (txid,vout) => (block_height,output_value)
 
 struct UtxoCacheRow {
     key: ScriptCacheKey,

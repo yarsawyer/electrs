@@ -3,7 +3,12 @@ use bitcoin::{
     Txid,
 };
 
-use crate::{media::Media, util::errors::AsAnyhow};
+use crate::{
+    media::Media,
+    util::{errors::AsAnyhow, TransactionStatus},
+};
+
+use super::InscriptionId;
 
 use {
     bitcoin::{
@@ -21,10 +26,11 @@ pub(crate) struct Inscription {
     content_type: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub(super) struct Ord {
+#[derive(Deserialize, Serialize)]
+pub(crate) struct Ord {
     #[serde(flatten)]
     pub meta: InscriptionMeta,
+    pub status: TransactionStatus,
     pub owner: String,
 }
 
@@ -34,6 +40,7 @@ pub struct InscriptionMeta {
     pub content_length: usize,
     pub outpoint: Txid,
     pub genesis: Txid,
+    pub inscription_id: InscriptionId,
 }
 
 impl InscriptionMeta {
@@ -48,6 +55,7 @@ impl InscriptionMeta {
             content_length,
             outpoint,
             genesis,
+            inscription_id: InscriptionId::from(genesis),
         }
     }
 
@@ -81,6 +89,7 @@ impl InscriptionMeta {
             content_type: content_type.to_owned(),
             genesis,
             outpoint,
+            inscription_id: InscriptionId::from(genesis),
         })
     }
 
