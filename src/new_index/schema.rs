@@ -24,6 +24,7 @@ use crate::daemon::Daemon;
 use crate::inscription_entries::index::{
     INSCRIPTION_ID_TO_META, PARTIAL_TXID_TO_TXIDS, TXID_IS_INSCRIPTION,
 };
+use crate::inscription_entries::inscription::Ord;
 use crate::inscription_entries::InscriptionId;
 use crate::inscription_entries::{inscription::InscriptionMeta, Entry};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
@@ -812,49 +813,49 @@ impl ChainQuery {
         Ok((utxos, lastblock, processed_items))
     }
 
-    pub fn new_ords(&self, limit: usize) -> Result<Vec<(String, InscriptionMeta)>> {
+    pub fn new_ords(&self, limit: usize) -> Result<Vec<Ord>> {
+        // TODO replace txid of genesis tx to inscription_id
         let prefix = TXID_IS_INSCRIPTION.as_bytes();
         let iter = self
             .store
             .inscription_db()
-            .raw_rev_iter(prefix)
+            .iter_scan_reverse(prefix, &[prefix, &[255]].concat())
             .take(limit)
-            .map(|x| x.map(|x| (x.0[prefix.len()..].to_vec(), x.1.to_vec())))
-            .map(|x| {
-                x.map(|(_, genesis_owner)| {
-                    let (genesis, owner) = genesis_owner.split_at(32);
-                    (genesis.to_vec(), owner.to_vec())
-                })
+            .map(|x| (x.key[prefix.len()..].to_vec(), x.value))
+            .map(|(_, genesis_owner)| {
+                let (genesis, owner) = genesis_owner.split_at(32);
+                (genesis.to_vec(), owner.to_vec())
             });
 
         let mut ords = vec![];
-        for txid_genesis_owner in iter {
-            let (genesis, owner) = txid_genesis_owner.anyhow()?;
+        for (genesis, owner) in iter {
+            let inscription_id = InscriptionId {
+                txid: Txid::from_slice(&genesis).anyhow_as("Failed to parse genesis txid")?,
+                index: 0,
+            };
+
+            error!("{:#?}", inscription_id);
+
             let raw_meta = self
                 .store
                 .inscription_db()
-                .get(&db_key!(INSCRIPTION_ID_TO_META, &genesis))
+                .get(&db_key!(
+                    INSCRIPTION_ID_TO_META,
+                    &inscription_id
+                        .store()
+                        .anyhow_as("Failed to store inscription_id")?
+                ))
                 .anyhow()?;
             let meta = InscriptionMeta::from_bytes(&raw_meta).anyhow()?;
             let owner = String::from_utf8(owner.to_vec()).anyhow_as("Owner problem :(")?;
-            // let inscription_id = InscriptionId {
-            //     txid: Txid::from_slice(&raw_inscription_id[..32]).anyhow()?,
-            //     index: u32::from_be_bytes(raw_inscription_id[32..].try_into().anyhow()?),
-            // };
-            // let tx = self.store.txstore_db().get(&db_key!("T", &raw_inscription_id[..32])).anyhow()?;
-            // let tx = bitcoin::Transaction::consensus_decode(std::io::Cursor::new(tx)).anyhow()?;
-            // let owner = tx.output.first().unwrap().script_pubkey.clone();
-            //Network::
-            //if owner.is_p2pk() { owner.to_address_str(network)}
 
-            //let owner = Address::from_script(&owner, bitcoin::network::constants::Network::Bitcoin).anyhow()?;
-            ords.push((owner.to_string(), meta));
+            ords.push(Ord { meta, owner });
         }
 
         Ok(ords)
     }
 
-    // TODO: avoid duplication with stats/stats_delta?
+    // TODO: avoid duplication
     pub fn ords(
         &self,
         scripthash: &[u8],
@@ -866,7 +867,7 @@ impl ChainQuery {
 
         // get the last known utxo set and the blockhash it was updated for.
         // invalidates the cache if the block was orphaned.
-        let cache: Option<(UtxoMap, usize)> = self
+        let cache = self
             .store
             .cache_db
             .get(&UtxoCacheRow::key(scripthash, key))

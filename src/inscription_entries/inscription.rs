@@ -22,6 +22,13 @@ pub(crate) struct Inscription {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub(super) struct Ord {
+    #[serde(flatten)]
+    pub meta: InscriptionMeta,
+    pub owner: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct InscriptionMeta {
     pub content_type: String,
     pub content_length: usize,

@@ -6,7 +6,7 @@ use crate::new_index::db::DBFlush;
 use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::schema::OrdsSearcher;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
-use crate::util::errors::UnwrapPrint;
+use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
     has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
@@ -852,15 +852,18 @@ fn handle_request(
         }
         // todo update md
         (&Method::GET, Some(&"ord"), Some(&"txid"), Some(txid), None, None) => {
-            let txid = Txid::from_str(txid).unwrap();
+            let txid = Txid::from_hex(txid).expect("1");
             let genesis = query
                 .chain()
                 .store()
                 .inscription_db()
                 .get(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()))
-                .map(|x| Txid::from_slice(&x))
-                .unwrap()
-                .unwrap();
+                .map(|x| {
+                    error!("{:?}", &x);
+                    Txid::from_slice(&x[..32])
+                })
+                .expect("2")
+                .expect("3");
 
             http_message(StatusCode::OK, genesis.to_hex(), TTL_LONG)
         }
@@ -962,7 +965,7 @@ fn handle_request(
             json_response(utxos, TTL_SHORT)
         }
         // todo update md
-        (&Method::GET, Some(&"topords"), None, None, None, None) => {
+        (&Method::GET, Some(&"discovery"), None, None, None, None) => {
             let top_ords = query.chain().new_ords(query.config().utxos_limit)?;
             json_response(top_ords, TTL_SHORT)
         }
@@ -1246,7 +1249,7 @@ fn handle_request(
             json_response(query.estimate_fee_map(), TTL_SHORT)
         }
 
-        (&Method::GET, Some(&"coin"), Some(&"BELLS"), None, None, None) => {
+        (&Method::GET, Some(&"last-price"), None, None, None, None) => {
             #[derive(serde::Serialize)]
             struct J {
                 ticker: String,

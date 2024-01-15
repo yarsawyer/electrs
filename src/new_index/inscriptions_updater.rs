@@ -14,7 +14,7 @@ use crate::{
     util::errors::AsAnyhow,
 };
 use anyhow::Result;
-use bitcoin::{consensus::Decodable, Address};
+use bitcoin::{consensus::Decodable, hashes::hex::ToHex, Address};
 use bitcoin::{hashes::Hash, Transaction, Txid};
 
 use super::{Store, DB};
@@ -102,7 +102,6 @@ impl<'a> InscriptionUpdater<'a> {
                     .inscription_db()
                     .remove(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.into_inner()))
                 {
-                    //info!("Ord was move from:{:?} to:{:?}", prev_tx.to_hex(), txid.to_hex() );
                     let new_owner = tx
                         .output
                         .first()
@@ -155,6 +154,7 @@ impl<'a> InscriptionUpdater<'a> {
 
                 let og_inscription_id = InscriptionId {
                     txid: Txid::from_slice(&txids_vec[0..32]).track_err()?,
+                    // TODO find correct index instead hardcode
                     index: 0,
                 };
                 store.inscription_db().put(
