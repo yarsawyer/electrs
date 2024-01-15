@@ -45,13 +45,11 @@ const MIN_HISTORY_ITEMS_TO_CACHE: usize = 50;
 type Limit = usize;
 type Page = usize;
 
-const FIRST_ORDS_BLOCK: usize = 22490;
-
 pub enum OrdsSearcher {
     After(Txid, Limit),
     New(Limit),
     Pagination(Page, Limit),
-    All,
+    All(usize),
 }
 
 pub struct Store {
@@ -1001,21 +999,7 @@ impl ChainQuery {
 
                         let address = String::from_utf8(genesis[32..].to_vec())
                             .anyhow_as("Address parse problem :(")?;
-                        // let address = {
-                        //     let raw_tx = self
-                        //         .store
-                        //         .txstore_db()
-                        //         .get(&db_key!("T", &info.txid))
-                        //         .anyhow_as("Failed to get raw tx")?;
-                        //     let tx = bitcoin::Transaction::consensus_decode(std::io::Cursor::new(
-                        //         raw_tx,
-                        //     ))
-                        //     .anyhow_as("Failed to decode tx")?;
-                        //     Address::from_script(
-                        //         &tx.output.first().unwrap().script_pubkey,
-                        //         bitcoin::network::constants::Network::Bitcoin,
-                        //     )
-                        // };
+
                         utxos.insert(
                             history.get_funded_outpoint(),
                             (blockid, info.value, Some(inscription_id), Some(address)),
@@ -1073,9 +1057,9 @@ impl ChainQuery {
                     .map(TxHistoryRow::from_row);
                 self.ords_iter(ords_utxo, history_iter, *limit)
             }
-            OrdsSearcher::All => {
+            OrdsSearcher::All(from_block) => {
                 let history_iter = self
-                    .history_iter_scan(b'H', scripthash, FIRST_ORDS_BLOCK)
+                    .history_iter_scan(b'H', scripthash, *from_block)
                     .map(TxHistoryRow::from_row);
                 self.ords_iter(ords_utxo, history_iter, usize::MAX)
             }

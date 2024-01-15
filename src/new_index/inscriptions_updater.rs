@@ -91,16 +91,16 @@ impl<'a> InscriptionUpdater<'a> {
 
         match Inscription::from_transactions(txs.clone()) {
             ParsedInscription::None => {
-                let prev_tx = tx
-                    .input
-                    .first()
-                    .anyhow_as("No inputs :(")?
-                    .previous_output
-                    .txid;
+                let prev_tx = tx.input.first().anyhow_as("No inputs :(")?.previous_output;
+
+                // TODO find correct index instead hardcode
+                if prev_tx.vout != 0 {
+                    return Ok(0);
+                }
 
                 if let Some(shit) = store
                     .inscription_db()
-                    .remove(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.into_inner()))
+                    .remove(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.txid.into_inner()))
                 {
                     let new_owner = tx
                         .output
@@ -143,15 +143,6 @@ impl<'a> InscriptionUpdater<'a> {
                 let mut txid_vec = txid.into_inner().to_vec();
                 txids_vec.append(&mut txid_vec);
 
-                let mut inscription_id = [0_u8; 36];
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        txids_vec.as_ptr(),
-                        inscription_id.as_mut_ptr(),
-                        32,
-                    )
-                }
-
                 let og_inscription_id = InscriptionId {
                     txid: Txid::from_slice(&txids_vec[0..32]).track_err()?,
                     // TODO find correct index instead hardcode
@@ -166,6 +157,7 @@ impl<'a> InscriptionUpdater<'a> {
                 );
 
                 let genesis = txs.first().anyhow_as("BIG COCKS")?.txid();
+
                 let owner = tx
                     .output
                     .first()

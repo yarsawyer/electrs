@@ -132,6 +132,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             Arc::clone(&chain),
             precache_scripthashes,
             config.precache_threads,
+            config.first_inscription_block,
         );
     }
 
