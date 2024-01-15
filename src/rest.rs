@@ -319,7 +319,7 @@ struct UtxoValue {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub genesis: Option<Txid>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner: Option<Address>,
+    pub owner: Option<String>,
 }
 impl From<Utxo> for UtxoValue {
     fn from(utxo: Utxo) -> Self {
