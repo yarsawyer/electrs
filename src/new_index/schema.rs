@@ -926,7 +926,7 @@ impl ChainQuery {
                 );
             }
         }
-        let mut newutxos = newutxos
+        let newutxos = newutxos
             .into_iter()
             .map(|(outpoint, (blockid, value, inscription_id, owner))| {
                 // in elements/liquid chains, we have to lookup the txo in order to get its
@@ -969,14 +969,7 @@ impl ChainQuery {
                 }
             })
             .collect_vec();
-        newutxos.sort_by(|a, b| {
-            b.inscription_meta
-                .as_ref()
-                .unwrap()
-                .number
-                .cmp(&a.inscription_meta.as_ref().unwrap().number)
-        });
-        // format as Utxo objects
+
         Ok(newutxos)
     }
 
@@ -1044,7 +1037,7 @@ impl ChainQuery {
             };
 
             // abort if the utxo set size excedees the limit at any point in time
-            if utxos.len() > limit {
+            if utxos.len() == limit {
                 // bail!(ErrorKind::TooPopular)
                 break;
             }
@@ -1063,12 +1056,8 @@ impl ChainQuery {
 
         match searcher {
             OrdsSearcher::After(last_seen_txid, limit) => {
-                let height = self
-                    .tx_confirming_block(last_seen_txid)
-                    .anyhow_as("No block height")?
-                    .height;
                 let history_iter = self
-                    .history_iter_scan(b'H', scripthash, height)
+                    .history_iter_scan_reverse(b'H', scripthash)
                     .map(TxHistoryRow::from_row)
                     .skip_while(|history| last_seen_txid != &history.get_txid()) // skip until we reach the last_seen_txid
                     .skip(1); // skip last_seen_txid
@@ -1423,33 +1412,12 @@ fn load_blockheaders(db: &DB) -> HashMap<BlockHash, BlockHeader> {
 }
 
 fn add_blocks(block_entries: &[BlockEntry], iconfig: &IndexerConfig) -> Vec<DBRow> {
-    // persist individual transactions:
-    //      T{txid} → {rawtx}
-    //      C{txid}{blockhash}{height} →
-    //      O{txid}{index} → {txout}
-    // persist block headers', block txids' and metadata rows:
-    //      B{blockhash} → {header}
-    //      X{blockhash} → {txid1}...{txidN}
-    //      M{blockhash} → {tx_count}{size}{weight}
-    // store
-    //     .inscription_db()
-    //     .put(&db_key!(OUTPOINT_TO_SATRANGES,&OutPoint::null().store().unwrap()), &[]);
-
-    // tx.open_table(OUTPOINT_TO_SAT_RANGES)?
-    // .insert(&OutPoint::null().store(),)?;
-
     block_entries
         .par_iter() // serialization is CPU-intensive
         .map(|b| {
             let mut rows = vec![];
             let blockhash = full_hash(&b.entry.hash()[..]);
             let txids = b.block.txdata.iter().map(|x| x.txid()).collect_vec();
-
-            // let updater: HashSet<Txid> =
-            //     Updater::update(b, store.clone(), &mut sender2, &mut receiver, &mut shit)
-            //         .unwrap()
-            //         .into_iter()
-            //         .collect();
 
             for tx in &b.block.txdata {
                 add_transaction(tx, blockhash, &mut rows, iconfig);
