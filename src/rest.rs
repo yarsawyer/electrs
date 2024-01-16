@@ -1168,6 +1168,18 @@ fn handle_request(
         (&Method::GET, Some(&"mempool"), None, None, None, None) => {
             json_response(query.mempool().backlog_stats(), TTL_SHORT)
         }
+        (&Method::GET, Some(&"test"), Some(shit), None, None, None) => {
+            let shit = query
+                .chain()
+                .store()
+                .inscription_db()
+                .get(&db_key!(TXID_IS_INSCRIPTION, shit.as_bytes()));
+            if let Some(_) = shit {
+                return json_response(json!({ "founded": true }), 0);
+            } else {
+                http_message(StatusCode::BAD_REQUEST, "shit", 0)
+            }
+        }
         (&Method::GET, Some(&"mempool"), Some(&"txids"), None, None, None) => {
             json_response(query.mempool().txids(), TTL_SHORT)
         }
