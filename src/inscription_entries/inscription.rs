@@ -5,6 +5,7 @@ use bitcoin::{
 
 use crate::{
     media::Media,
+    new_index::Utxo,
     util::{errors::AsAnyhow, TransactionStatus},
 };
 
@@ -41,6 +42,7 @@ pub struct InscriptionMeta {
     pub outpoint: Txid,
     pub genesis: Txid,
     pub inscription_id: InscriptionId,
+    pub number: usize,
 }
 
 impl InscriptionMeta {
@@ -49,12 +51,14 @@ impl InscriptionMeta {
         content_length: usize,
         outpoint: Txid,
         genesis: Txid,
+        number: usize,
     ) -> Self {
         Self {
             content_type,
             content_length,
             outpoint,
             genesis,
+            number,
             inscription_id: InscriptionId::from(genesis),
         }
     }
@@ -77,6 +81,7 @@ impl InscriptionMeta {
                 .anyhow_as("InscriptionMeta: Failed to parse outpoint")?,
         )
         .anyhow()?;
+
         let genesis = Txid::from_hex(
             split
                 .next()
@@ -84,11 +89,18 @@ impl InscriptionMeta {
         )
         .anyhow()?;
 
+        let number = split
+            .next()
+            .anyhow_as("InscriptionMeta: Failed to parse number")?
+            .parse()
+            .anyhow_as("InscriptionMeta: Failed to parse number")?;
+
         Ok(Self {
             content_length,
             content_type: content_type.to_owned(),
             genesis,
             outpoint,
+            number,
             inscription_id: InscriptionId::from(genesis),
         })
     }
@@ -106,6 +118,9 @@ impl InscriptionMeta {
         result.push(':');
 
         result.push_str(&self.genesis.to_hex());
+        result.push(':');
+
+        result.push_str(&self.number.to_string());
 
         Ok(result.as_bytes().to_vec())
     }

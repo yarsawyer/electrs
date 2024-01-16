@@ -198,12 +198,8 @@ impl Mempool {
                 vout: info.vout as u32,
                 value: info.value,
                 confirmed: None,
-                inscription_id: None,
-                content_length: None,
-                content_type: None,
-                genesis: None,
-                outpoint: None,
-                address: None,
+                inscription_meta: None,
+                owner: None,
             };
 
             if !self.has_spend(&OutPoint::from(&v)) {
