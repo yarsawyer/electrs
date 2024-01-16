@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::{convert::TryInto, io::Read, sync::Arc};
 
 use crate::{
     db_key,
     inscription_entries::{
         entry::Entry,
         height::Height,
-        index::{INSCRIPTION_ID_TO_META, INSCRIPTION_ID_TO_TXIDS, TXID_IS_INSCRIPTION},
+        index::{
+            INSCRIPTION_ID_TO_META, INSCRIPTION_ID_TO_TXIDS, LAST_INSCRIPTION_NUMBER,
+            TXID_IS_INSCRIPTION,
+        },
         inscription::Inscription,
         inscription::{InscriptionMeta, ParsedInscription},
         inscription_id::InscriptionId,
@@ -177,12 +180,31 @@ impl<'a> InscriptionUpdater<'a> {
                     &[genesis.into_inner().as_slice(), &owner].concat(),
                 );
 
+                let mut number: usize = store
+                    .inscription_db()
+                    .remove(&LAST_INSCRIPTION_NUMBER.as_bytes())
+                    .map(|x| {
+                        if let Ok(bytes) = x.try_into() {
+                            usize::from_be_bytes(bytes)
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0);
+
                 let inscription_meta = InscriptionMeta::new(
                     _inscription.content_type().anyhow()?.to_owned(),
                     _inscription.content_length().anyhow()?,
                     txs.last().anyhow()?.txid(),
                     og_inscription_id.txid,
+                    number,
                 );
+
+                number += 1;
+
+                store
+                    .inscription_db()
+                    .put(&LAST_INSCRIPTION_NUMBER.as_bytes(), &number.to_be_bytes());
 
                 store.inscription_db().put(
                     &db_key!(INSCRIPTION_ID_TO_META, &og_inscription_id.store().anyhow()?),

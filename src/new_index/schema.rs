@@ -1,8 +1,7 @@
-use bitcoin::consensus::Decodable;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hashes::Hash;
 use bitcoin::util::merkleblock::MerkleBlock;
-use bitcoin::{Address, VarInt};
+use bitcoin::VarInt;
 use itertools::Itertools;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -12,7 +11,6 @@ use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
-use std::ops::Add;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -140,15 +138,11 @@ type UtxoMap = HashMap<OutPoint, (BlockId, Value, Option<InscriptionId>, Option<
 #[derive(Debug)]
 pub struct Utxo {
     pub txid: Txid,
-    pub inscription_id: Option<InscriptionId>,
     pub vout: u32,
     pub confirmed: Option<BlockId>,
     pub value: Value,
-    pub content_type: Option<String>,
-    pub content_length: Option<usize>,
-    pub outpoint: Option<Txid>,
-    pub genesis: Option<Txid>,
-    pub address: Option<String>,
+    pub inscription_meta: Option<InscriptionMeta>,
+    pub owner: Option<String>,
 }
 
 impl From<&Utxo> for OutPoint {
@@ -653,15 +647,28 @@ impl ChainQuery {
                 Some(_) => 1, // skip the last_seen_txid itself
                 None => 0,
             })
-            .filter_map(|txid| self.tx_confirming_block(&txid).map(|b| (txid, b)))
-            .take(limit)
-            .collect::<Vec<(Txid, BlockId)>>();
+            .filter_map(|txid| self.tx_confirming_block(&txid).map(|b| (txid, b)));
+
+        let mut txs = vec![];
+
+        for data in txs_conf {
+            if let None = self
+                .store()
+                .inscription_db()
+                .get(&db_key!(TXID_IS_INSCRIPTION, &data.0.into_inner()))
+            {
+                txs.push(data);
+            }
+            if txs.len() >= limit {
+                break;
+            }
+        }
 
         Ok(self
-            .lookup_txns(&txs_conf)
+            .lookup_txns(&txs)
             .map_err(|e| format!("failed looking up txs in history index: {e:?}"))?
             .into_iter()
-            .zip(txs_conf)
+            .zip(txs)
             .map(|(tx, (_, blockid))| (tx, blockid))
             .collect())
     }
@@ -718,7 +725,7 @@ impl ChainQuery {
         // format as Utxo objects
         Ok(newutxos
             .into_iter()
-            .map(|(outpoint, (blockid, value, inscription_id, address))| {
+            .map(|(outpoint, (blockid, value, inscription_id, owner))| {
                 // in elements/liquid chains, we have to lookup the txo in order to get its
                 // associated asset. the asset information could be kept in the db history rows
                 // alongside the value to avoid this.
@@ -730,12 +737,8 @@ impl ChainQuery {
                     vout: outpoint.vout,
                     value,
                     confirmed: Some(blockid),
-                    inscription_id,
-                    content_length: None,
-                    content_type: None,
-                    genesis: None,
-                    outpoint: None,
-                    address,
+                    inscription_meta: None,
+                    owner,
 
                     #[cfg(feature = "liquid")]
                     asset: txo.asset,
@@ -907,11 +910,9 @@ impl ChainQuery {
                 );
             }
         }
-
-        // format as Utxo objects
-        Ok(newutxos
+        let mut newutxos = newutxos
             .into_iter()
-            .map(|(outpoint, (blockid, value, inscription_id, address))| {
+            .map(|(outpoint, (blockid, value, inscription_id, owner))| {
                 // in elements/liquid chains, we have to lookup the txo in order to get its
                 // associated asset. the asset information could be kept in the db history rows
                 // alongside the value to avoid this.
@@ -925,7 +926,7 @@ impl ChainQuery {
                         INSCRIPTION_ID_TO_META,
                         &inscription_id
                             .store()
-                            .expect("schema.rs:873 - Failed to store inscription_id")
+                            .expect("schema.rs:913 - Failed to store inscription_id")
                     ));
                     if let Some(inscription_raw) = inscription_raw {
                         inscription_meta = Some(
@@ -940,14 +941,8 @@ impl ChainQuery {
                     vout: outpoint.vout,
                     value,
                     confirmed: Some(blockid),
-                    inscription_id,
-                    content_length: inscription_meta.as_ref().map(|meta| meta.content_length),
-                    content_type: inscription_meta
-                        .as_ref()
-                        .map(|meta| meta.content_type.clone()),
-                    outpoint: inscription_meta.as_ref().map(|meta| meta.outpoint),
-                    genesis: inscription_meta.as_ref().map(|meta| meta.genesis),
-                    address,
+                    inscription_meta,
+                    owner,
 
                     #[cfg(feature = "liquid")]
                     asset: txo.asset,
@@ -957,7 +952,16 @@ impl ChainQuery {
                     witness: txo.witness,
                 }
             })
-            .collect())
+            .collect_vec();
+        newutxos.sort_by(|a, b| {
+            b.inscription_meta
+                .as_ref()
+                .unwrap()
+                .number
+                .cmp(&a.inscription_meta.as_ref().unwrap().number)
+        });
+        // format as Utxo objects
+        Ok(newutxos)
     }
 
     fn ords_iter(
@@ -997,12 +1001,12 @@ impl ChainQuery {
                             index: 0,
                         };
 
-                        let address = String::from_utf8(genesis[32..].to_vec())
-                            .anyhow_as("Address parse problem :(")?;
+                        let owner = String::from_utf8(genesis[32..].to_vec())
+                            .anyhow_as("Owner parse problem")?;
 
                         utxos.insert(
                             history.get_funded_outpoint(),
-                            (blockid, info.value, Some(inscription_id), Some(address)),
+                            (blockid, info.value, Some(inscription_id), Some(owner)),
                         );
                     }
                 }

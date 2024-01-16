@@ -1,6 +1,7 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
 use crate::inscription_entries::index::TXID_IS_INSCRIPTION;
+use crate::inscription_entries::inscription::InscriptionMeta;
 use crate::inscription_entries::InscriptionId;
 use crate::new_index::db::DBFlush;
 use crate::new_index::exchange_data::get_bells_price;
@@ -309,17 +310,10 @@ struct UtxoValue {
     status: TransactionStatus,
     value: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    inscription_id: Option<InscriptionId>,
+    #[serde(flatten)]
+    inscription_meta: Option<InscriptionMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_length: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub outpoint: Option<Txid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub genesis: Option<Txid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner: Option<String>,
+    owner: Option<String>,
 }
 impl From<Utxo> for UtxoValue {
     fn from(utxo: Utxo) -> Self {
@@ -328,12 +322,8 @@ impl From<Utxo> for UtxoValue {
             vout: utxo.vout,
             status: TransactionStatus::from(utxo.confirmed),
             value: utxo.value,
-            inscription_id: utxo.inscription_id,
-            content_length: utxo.content_length,
-            content_type: utxo.content_type,
-            genesis: utxo.genesis,
-            outpoint: utxo.outpoint,
-            owner: utxo.address,
+            inscription_meta: utxo.inscription_meta,
+            owner: utxo.owner,
         }
     }
 }
