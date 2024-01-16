@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::chain::{
-    BlockHash, BlockHeader, Network, OutPoint, Script, Transaction, TxOut, Txid, Value,
+    self, BlockHash, BlockHeader, Network, OutPoint, Script, Transaction, TxOut, Txid, Value,
 };
 use crate::config::Config;
 use crate::daemon::Daemon;
@@ -614,9 +614,10 @@ impl ChainQuery {
         scripthash: &[u8],
         last_seen_txid: Option<&Txid>,
         limit: usize,
+        address_str: String,
     ) -> Result<Vec<(Transaction, BlockId)>> {
         // scripthash lookup
-        self._history(b'H', scripthash, last_seen_txid, limit)
+        self._history(b'H', scripthash, last_seen_txid, limit, address_str)
     }
 
     pub fn history_txids_iter<'a>(&'a self, scripthash: &[u8]) -> impl Iterator<Item = Txid> + 'a {
@@ -631,6 +632,7 @@ impl ChainQuery {
         hash: &[u8],
         last_seen_txid: Option<&Txid>,
         limit: usize,
+        address_str: String,
     ) -> Result<Vec<(Transaction, BlockId)>> {
         let _timer_scan = self.start_timer("history");
         let txs_conf = self
@@ -647,30 +649,44 @@ impl ChainQuery {
                 Some(_) => 1, // skip the last_seen_txid itself
                 None => 0,
             })
-            .filter_map(|txid| self.tx_confirming_block(&txid).map(|b| (txid, b)));
+            .filter_map(|txid| self.tx_confirming_block(&txid).map(|b| (txid, b)))
+            .map(|x| (self.lookup_txn(&x.0, Some(&x.1.hash)), x.1));
 
         let mut txs = vec![];
 
-        for data in txs_conf {
-            if let None = self
+        for (tx, block) in txs_conf {
+            let Some(tx) = tx else {
+                continue;
+            };
+
+            let tx_db = self
                 .store()
                 .inscription_db()
-                .get(&db_key!(TXID_IS_INSCRIPTION, &data.0.into_inner()))
-            {
-                txs.push(data);
+                .get(&db_key!(TXID_IS_INSCRIPTION, &tx.txid().into_inner()));
+
+            match tx_db {
+                Some(_) => {
+                    for i in tx.output.iter().skip(1) {
+                        let current_address = i
+                            .script_pubkey
+                            .to_address_str(chain::Network::Bellscoin)
+                            .anyhow_as("Cannot extract address from script pub key")?;
+                        if address_str == current_address {
+                            txs.push((tx.clone(), block.clone()));
+                        }
+                    }
+                }
+                None => {
+                    txs.push((tx, block));
+                }
             }
+
             if txs.len() >= limit {
                 break;
             }
         }
 
-        Ok(self
-            .lookup_txns(&txs)
-            .map_err(|e| format!("failed looking up txs in history index: {e:?}"))?
-            .into_iter()
-            .zip(txs)
-            .map(|(tx, (_, blockid))| (tx, blockid))
-            .collect())
+        Ok(txs)
     }
 
     pub fn history_txids(&self, scripthash: &[u8], limit: usize) -> Vec<(Txid, BlockId)> {
@@ -785,7 +801,7 @@ impl ChainQuery {
                         .inscription_db()
                         .get(&db_key!(TXID_IS_INSCRIPTION, &info.txid))
                         .is_some();
-                    if !is_inscription {
+                    if !is_inscription || info.vout != 0 {
                         utxos.insert(
                             history.get_funded_outpoint(),
                             (blockid, info.value, None, None),
@@ -990,6 +1006,9 @@ impl ChainQuery {
 
             match history.key.txinfo {
                 TxHistoryInfo::Funding(ref info) => {
+                    if info.vout != 0 {
+                        continue;
+                    }
                     let genesis_ord = self
                         .store
                         .inscription_db()
