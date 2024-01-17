@@ -6,8 +6,8 @@ use crate::{
         entry::Entry,
         height::Height,
         index::{
-            INSCRIPTION_ID_TO_META, INSCRIPTION_ID_TO_TXIDS, LAST_INSCRIPTION_NUMBER,
-            TXID_IS_INSCRIPTION,
+            ADDRESS_TO_ORD, INSCRIPTION_ID_TO_META, INSCRIPTION_ID_TO_TXIDS,
+            LAST_INSCRIPTION_NUMBER, TXID_IS_INSCRIPTION,
         },
         inscription::Inscription,
         inscription::{InscriptionMeta, ParsedInscription},
@@ -19,8 +19,9 @@ use crate::{
 use anyhow::Result;
 use bitcoin::{consensus::Decodable, hashes::hex::ToHex, Address};
 use bitcoin::{hashes::Hash, Transaction, Txid};
+use stderrlog::new;
 
-use super::{Store, DB};
+use super::{schema::OrdHistoryRow, Store, DB};
 
 #[derive(Clone)]
 pub(super) struct Flotsam {
@@ -61,6 +62,7 @@ impl<'a> InscriptionUpdater<'a> {
         store: Arc<Store>,
         tx: &Transaction,
         txid: Txid,
+        block_height: u32,
     ) -> Result<u64> {
         let previous_txid = tx.input[0].previous_output.txid;
         let previous_txid_bytes: [u8; 32] = previous_txid.into_inner();
@@ -101,7 +103,7 @@ impl<'a> InscriptionUpdater<'a> {
                     return Ok(0);
                 }
 
-                if let Some(shit) = store
+                if let Some(value) = store
                     .inscription_db()
                     .remove(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.txid.into_inner()))
                 {
@@ -118,11 +120,36 @@ impl<'a> InscriptionUpdater<'a> {
                         .anyhow_as("No owner :(")?
                         .as_bytes()
                         .to_owned();
-                    let new_shit = [&shit[..32], &new_owner].concat();
+                    let new_value =
+                        [&value[..32], &new_owner, &block_height.to_be_bytes()].concat();
+
+                    store.inscription_db().put(
+                        &db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()),
+                        &new_value,
+                    );
+
+                    let row = OrdHistoryRow::new(
+                        String::from_utf8(value[32..value.len() - 4].to_vec()).unwrap(),
+                        u32::from_be_bytes(value[value.len() - 4..].try_into().unwrap()),
+                        prev_tx.txid,
+                        tx.output.first().unwrap().value,
+                    );
+
+                    let value = store
+                        .inscription_db()
+                        .remove(&row.get_key())
+                        .unwrap_or(tx.output.first().unwrap().value.to_be_bytes().to_vec());
+
+                    let new_row = OrdHistoryRow::new(
+                        String::from_utf8(new_owner.clone()).unwrap(),
+                        block_height as u32,
+                        txid,
+                        u64::from_be_bytes(value.clone().try_into().unwrap()),
+                    );
 
                     store
                         .inscription_db()
-                        .put(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()), &new_shit)
+                        .write(vec![new_row.into_row()], super::db::DBFlush::Disable);
                 };
             }
 
@@ -171,13 +198,16 @@ impl<'a> InscriptionUpdater<'a> {
                         )
                     })
                     .map(|x| x.to_string())
-                    .anyhow_as("No owner :(")?
-                    .as_bytes()
-                    .to_owned();
+                    .anyhow_as("No owner :(")?;
 
                 store.inscription_db().put(
                     &db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()),
-                    &[genesis.into_inner().as_slice(), &owner].concat(),
+                    &[
+                        genesis.into_inner().as_slice(),
+                        owner.as_bytes(),
+                        &block_height.to_be_bytes(),
+                    ]
+                    .concat(),
                 );
 
                 let mut number: usize = store
@@ -210,6 +240,17 @@ impl<'a> InscriptionUpdater<'a> {
                     &db_key!(INSCRIPTION_ID_TO_META, &og_inscription_id.store().anyhow()?),
                     &inscription_meta.into_bytes()?,
                 );
+
+                let new_row = OrdHistoryRow::new(
+                    owner,
+                    block_height as u32,
+                    txid,
+                    tx.output.first().unwrap().value,
+                );
+
+                store
+                    .inscription_db()
+                    .write(vec![new_row.into_row()], super::db::DBFlush::Disable);
             }
         }
         Ok(0)

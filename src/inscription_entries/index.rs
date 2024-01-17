@@ -100,6 +100,7 @@ define_prefix! { INSCRIPTION_ID_TO_INSCRIPTION_ENTRY, IITE }
 define_prefix! { PARTIAL_TXID_TO_TXIDS, PTTT }
 define_prefix! { OUTPOINT_TO_VALUE, OTV }
 define_prefix! { OUTPOINT_TO_SATRANGES, OTSR }
+define_prefix! { ADDRESS_TO_ORD, ATO }
 define_prefix! { STATISTIC_TO_COUNT, STC }
 define_prefix! { LAST_INSCRIPTION_NUMBER, LIN }
 define_prefix! { HEIGHT_TO_BLOCK_HASH, HTBH }

@@ -1,5 +1,4 @@
 use crate::errors::*;
-use crate::new_index::schema::OrdsSearcher;
 use crate::new_index::ChainQuery;
 use crate::util::{full_hash, FullHash};
 
@@ -12,12 +11,7 @@ use std::io::prelude::*;
 use std::sync::{atomic::AtomicUsize, Arc};
 use std::time::Instant;
 
-pub fn precache(
-    chain: Arc<ChainQuery>,
-    scripthashes: Vec<FullHash>,
-    threads: usize,
-    first_inscription_block: usize,
-) {
+pub fn precache(chain: Arc<ChainQuery>, scripthashes: Vec<FullHash>, threads: usize) {
     let total = scripthashes.len();
     info!(
         "Pre-caching stats and utxo set on {} threads for {} scripthashes",
@@ -39,7 +33,6 @@ pub fn precache(
                     // First, cache
                     chain.stats(&scripthash[..], crate::new_index::db::DBFlush::Disable);
                     let _ = chain.utxo(&scripthash[..], usize::MAX, crate::new_index::db::DBFlush::Disable);
-                    let _ = chain.ords(&scripthash[..],  &OrdsSearcher::All(first_inscription_block), crate::new_index::db::DBFlush::Disable);
 
                     // Then, increment the counter
                     let pre_increment = counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
