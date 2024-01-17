@@ -2,12 +2,10 @@ use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, T
 use crate::config::{Config, VERSION_STRING};
 use crate::inscription_entries::index::TXID_IS_INSCRIPTION;
 use crate::inscription_entries::inscription::InscriptionMeta;
-use crate::inscription_entries::InscriptionId;
-use crate::new_index::db::DBFlush;
 use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::schema::OrdsSearcher;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
-use crate::util::errors::{AsAnyhow, UnwrapPrint};
+use crate::util::errors::UnwrapPrint;
 use crate::util::{
     create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
     has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
@@ -19,8 +17,7 @@ use {bitcoin::consensus::encode, std::str::FromStr};
 
 use bitcoin::blockdata::opcodes;
 use bitcoin::hashes::hex::{FromHex, ToHex};
-use bitcoin::hashes::{Error as HashError, Hash};
-use bitcoin::Address;
+use bitcoin::hashes::Error as HashError;
 use hex::{self, FromHexError};
 
 use hyper::service::{make_service_fn, service_fn};
@@ -871,7 +868,7 @@ fn handle_request(
             let searcher = OrdsSearcher::After(last_seen_txid, query.config().utxos_limit);
             let ords: Vec<UtxoValue> = query
                 .chain()
-                .ords(&script_hash[..], &searcher, DBFlush::Enable)?
+                .ords(script_str.to_string(), &searcher)?
                 .into_iter()
                 .map(UtxoValue::from)
                 .collect();
@@ -933,7 +930,7 @@ fn handle_request(
             let searcher = OrdsSearcher::New(query.config().utxos_limit);
             let utxos: Vec<UtxoValue> = query
                 .chain()
-                .ords(&script_hash[..], &searcher, DBFlush::Enable)?
+                .ords(script_str.to_string(), &searcher)?
                 .into_iter()
                 .map(UtxoValue::from)
                 .collect();
@@ -1169,12 +1166,12 @@ fn handle_request(
             json_response(query.mempool().backlog_stats(), TTL_SHORT)
         }
         (&Method::GET, Some(&"test"), Some(shit), None, None, None) => {
-            let shit = query
+            let tx = query
                 .chain()
                 .store()
                 .inscription_db()
                 .get(&db_key!(TXID_IS_INSCRIPTION, shit.as_bytes()));
-            if let Some(_) = shit {
+            if let Some(_) = tx {
                 return json_response(json!({ "founded": true }), 0);
             } else {
                 http_message(StatusCode::BAD_REQUEST, "shit", 0)
@@ -1357,7 +1354,7 @@ fn to_scripthash(
     }
 }
 
-pub(crate) fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpError> {
+fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpError> {
     let addr = address::Address::from_str(addr)?;
 
     let is_expected_net = {

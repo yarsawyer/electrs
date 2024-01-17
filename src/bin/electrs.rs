@@ -68,9 +68,9 @@ fn run_server(config: Arc<Config>) -> Result<()> {
     );
 
     let last_indexed_block = store
-        .txstore_db()
-        .get(b"t")
-        .map(|x| bitcoin::consensus::encode::deserialize(&x).expect("invalid chain tip in `t`"));
+        .inscription_db()
+        .get(b"ot")
+        .map(|x| bitcoin::consensus::encode::deserialize(&x).expect("invalid chain tip in `ot`"));
 
     let mut tip = indexer.update(&daemon)?;
 
@@ -132,7 +132,6 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             Arc::clone(&chain),
             precache_scripthashes,
             config.precache_threads,
-            config.first_inscription_block,
         );
     }
 

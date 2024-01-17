@@ -93,14 +93,6 @@ impl Query {
         Ok(utxos)
     }
 
-    pub fn ords(&self, scripthash: &[u8], searcher: &OrdsSearcher) -> Result<Vec<Utxo>> {
-        let utxos = self
-            .chain
-            .ords(scripthash, searcher, super::db::DBFlush::Enable)?;
-
-        Ok(utxos)
-    }
-
     pub fn history_txids(&self, scripthash: &[u8], limit: usize) -> Vec<(Txid, Option<BlockId>)> {
         let confirmed_txids = self.chain.history_txids(scripthash, limit);
         let confirmed_len = confirmed_txids.len();
