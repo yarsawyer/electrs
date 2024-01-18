@@ -2,6 +2,7 @@ use crate::chain::{BlockHash, BlockHeader};
 use crate::errors::*;
 use crate::new_index::BlockEntry;
 
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::fmt;
 use std::iter::FromIterator;
@@ -207,6 +208,10 @@ impl HeaderList {
             assert_eq!(entry.height(), height);
             entry
         })
+    }
+
+    pub fn header_by_range(&self, start: usize, end: usize) -> impl Iterator<Item = &HeaderEntry> {
+        self.headers[start..=end].iter()
     }
 
     pub fn equals(&self, other: &HeaderList) -> bool {

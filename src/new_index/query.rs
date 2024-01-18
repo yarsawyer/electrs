@@ -8,6 +8,7 @@ use crate::chain::{Network, OutPoint, Transaction, TxOut, Txid};
 use crate::config::Config;
 use crate::daemon::Daemon;
 use crate::errors::*;
+use crate::inscription_entries::inscription::UserOrdStats;
 use crate::new_index::{ChainQuery, Mempool, ScriptStats, SpendingInput, Utxo};
 use crate::util::{is_spendable, BlockId, Bytes, TransactionStatus};
 
@@ -91,6 +92,10 @@ impl Query {
         utxos.extend(mempool.utxo(scripthash)?);
 
         Ok(utxos)
+    }
+
+    pub fn addr_ord_stats(&self, address: String) -> anyhow::Result<UserOrdStats> {
+        self.chain.addr_ord_stats(address)
     }
 
     pub fn history_txids(&self, scripthash: &[u8], limit: usize) -> Vec<(Txid, Option<BlockId>)> {

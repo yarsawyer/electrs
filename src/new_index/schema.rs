@@ -1,7 +1,6 @@
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
-use bitcoin::hashes::Hash;
 use bitcoin::util::merkleblock::MerkleBlock;
-use bitcoin::{Address, VarInt};
+use bitcoin::VarInt;
 use itertools::Itertools;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -12,25 +11,24 @@ use tracing_indicatif::span_ext::IndicatifSpanExt;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::chain::{
-    self, BlockHash, BlockHeader, Network, OutPoint, Script, Transaction, TxOut, Txid, Value,
+    BlockHash, BlockHeader, Network, OutPoint, Script, Transaction, TxOut, Txid, Value,
 };
 use crate::config::Config;
 use crate::daemon::Daemon;
 use crate::inscription_entries::index::{
-    INSCRIPTION_ID_TO_META, PARTIAL_TXID_TO_TXIDS, TXID_IS_INSCRIPTION,
+    ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, PARTIAL_TXID_TO_TXIDS, TXID_IS_INSCRIPTION,
 };
-use crate::inscription_entries::inscription::Ord;
+use crate::inscription_entries::inscription::{Ord, UserOrdStats};
 use crate::inscription_entries::InscriptionId;
 use crate::inscription_entries::{inscription::InscriptionMeta, Entry};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
-    BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr, TransactionStatus,
+    BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
 };
 use crate::{db_key, errors::*};
 
@@ -42,13 +40,11 @@ use super::inscriptions_updater::InscriptionUpdater;
 const MIN_HISTORY_ITEMS_TO_CACHE: usize = 50;
 
 type Limit = usize;
-type Page = usize;
+type SearchInscriptionNumber = Option<String>;
 
 pub enum OrdsSearcher {
-    After(Txid, Limit),
-    New(Limit),
-    Pagination(Page, Limit),
-    All(usize),
+    After(Txid, Limit, SearchInscriptionNumber),
+    New(Limit, SearchInscriptionNumber),
 }
 
 pub struct Store {
@@ -220,7 +216,7 @@ impl From<&Config> for IndexerConfig {
 
 pub enum InscriptionParseBlock {
     FromHeight(usize),
-    Hash(BlockHash),
+    ToHeight(usize),
 }
 
 pub struct ChainQuery {
@@ -265,7 +261,7 @@ impl Indexer {
         block: InscriptionParseBlock,
     ) -> anyhow::Result<()> {
         let mut inscription_updater =
-            InscriptionUpdater::new(0, PARTIAL_TXID_TO_TXIDS, self.store.inscription_db())
+            InscriptionUpdater::new(PARTIAL_TXID_TO_TXIDS, self.store.inscription_db())
                 .anyhow()
                 .unwrap();
 
@@ -278,11 +274,33 @@ impl Indexer {
                 .skip(height)
                 .map(|x| *x.hash())
                 .collect_vec(),
-            InscriptionParseBlock::Hash(hash) => vec![hash],
+            InscriptionParseBlock::ToHeight(height) => {
+                let last_indexed_block: BlockHash = self
+                    .store
+                    .inscription_db()
+                    .get(b"ot")
+                    .map(|x| {
+                        bitcoin::consensus::encode::deserialize(&x)
+                            .expect("invalid chain tip in `ot`")
+                    })
+                    .unwrap();
+
+                let last_number = self.get_block_height(last_indexed_block).unwrap();
+
+                self.store
+                    .indexed_headers
+                    .read()
+                    .header_by_range(last_number, height)
+                    .map(|x| *x.hash())
+                    .collect()
+            }
         };
 
         let mut progress_span = None;
         let mut progress_span_ = None;
+
+        let last_block_number = self.store.indexed_headers.read().len() as u64 - 4;
+
         if blocks.len() > 3 {
             let span = tracing::info_span!("index_blocks");
             span.pb_set_style(
@@ -290,20 +308,24 @@ impl Indexer {
                     .unwrap()
                     .progress_chars("█▉▊▋▌▍▎▏  "),
             );
-            span.pb_set_length(blocks.len() as u64);
-            span.pb_set_message("indexing blocks");
+            span.pb_set_length(last_block_number);
+            span.pb_set_message("indexing blocks with inscriptions");
+            span.pb_inc(last_block_number - blocks.len() as u64);
 
             progress_span = Some(span);
             progress_span_ = Some(progress_span.as_ref().unwrap().enter());
         }
 
-        let mut i = 0;
+        let mut i = last_block_number - blocks.len() as u64;
+        let mut tx_count = 0;
+
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
                 continue;
             };
             let block_number = self.get_block_height(*b_hash).unwrap();
 
+            tx_count += txs.len();
             for tx in txs {
                 let txid = tx.txid();
                 inscription_updater
@@ -318,16 +340,16 @@ impl Indexer {
 
             i += 1;
             if progress_span.is_some() {
-                tracing::Span::current().pb_inc(1);
-                progress_span
-                    .as_ref()
-                    .unwrap()
-                    .pb_set_message(&format!("{i}/{} indexing blocks", blocks.len()));
+                if i % 10 == 0 {
+                    tracing::Span::current().pb_inc(10);
+                    progress_span.as_ref().unwrap().pb_set_message(&format!(
+                        "{i}/{} indexing blocks. tx count: {tx_count}",
+                        last_block_number
+                    ));
+                }
             }
 
-            self.store
-                .inscription_db()
-                .put_sync(b"ot", &serialize(&b_hash));
+            self.store.inscription_db().put(b"ot", &serialize(&b_hash));
         }
 
         drop(progress_span_);
@@ -617,10 +639,10 @@ impl ChainQuery {
             &TxHistoryRow::prefix_height(code, hash, start_height as u32),
         )
     }
-    fn ord_iter_scan_reverse(&self, code: u8, hash: String) -> ReverseScanIterator {
+    fn ord_iter_scan_reverse(&self, hash: String) -> ReverseScanIterator {
         self.store.inscription_db.iter_scan_reverse(
-            &OrdHistoryRow::filter(code, hash.clone()),
-            &OrdHistoryRow::prefix_end(code, hash.clone()),
+            &OrdHistoryRow::filter(hash.clone()),
+            &OrdHistoryRow::prefix_end(hash.clone()),
         )
     }
     fn history_iter_scan_reverse(&self, code: u8, hash: &[u8]) -> ReverseScanIterator {
@@ -676,30 +698,8 @@ impl ChainQuery {
         let mut txs = vec![];
 
         for (tx, block) in txs_conf {
-            let Some(tx) = tx else {
-                continue;
-            };
-
-            let tx_db = self
-                .store()
-                .inscription_db()
-                .get(&db_key!(TXID_IS_INSCRIPTION, &tx.txid().into_inner()));
-
-            match tx_db {
-                Some(_) => {
-                    for i in tx.output.iter().skip(1) {
-                        let current_address = i
-                            .script_pubkey
-                            .to_address_str(chain::Network::Bellscoin)
-                            .anyhow_as("Cannot extract address from script pub key")?;
-                        if address_str == current_address {
-                            txs.push((tx.clone(), block.clone()));
-                        }
-                    }
-                }
-                None => {
-                    txs.push((tx, block));
-                }
+            if let Some(tx) = tx {
+                txs.push((tx, block));
             }
 
             if txs.len() >= limit {
@@ -851,104 +851,95 @@ impl ChainQuery {
         Ok((utxos, lastblock, processed_items))
     }
 
-    pub fn new_ords(&self, limit: usize) -> Result<Vec<Ord>> {
+    pub(crate) fn discovery(&self, limit: usize) -> Result<Vec<Ord>> {
+        todo!();
         // TODO replace txid of genesis tx to inscription_id
-        let prefix = TXID_IS_INSCRIPTION.as_bytes();
-        let iter = self
-            .store
+        // let prefix = TXID_IS_INSCRIPTION.as_bytes();
+        // let tx_ids = self
+        //     .store
+        //     .txstore_db()
+        //     .get(&db_key!(b"X", &self.best_hash().into_inner()));
+
+        // if let Some(txs) = tx_ids {
+        //     let tx_ids = bincode_util::deserialize_little::<Vec<Txid>>(&txs)
+        //         .anyhow_as("Failed to deserialize txids")?;
+
+        //     for tx in tx_ids {
+        //         let inscription_id = InscriptionId { txid: tx, index: 0 };
+
+        //         let raw_meta = self
+        //             .store
+        //             .inscription_db()
+        //             .get(&db_key!(
+        //                 INSCRIPTION_ID_TO_META,
+        //                 &inscription_id
+        //                     .store()
+        //                     .anyhow_as("Failed to store inscription_id")?
+        //             ))
+        //             .anyhow()?;
+        //         let meta = InscriptionMeta::from_raw(&raw_meta)
+        //             .anyhow_as("Cannot deserialize inscription meta")?;
+        //         let owner = String::from_utf8(owner.to_vec()).anyhow_as("Owner problem :(")?;
+
+        //         let status =
+        //             TransactionStatus::from(self.tx_confirming_block(&inscription_id.txid));
+
+        //         ords.push(Ord {
+        //             meta,
+        //             status,
+        //             owner,
+        //         });
+        //     }
+        // }
+    }
+
+    pub(crate) fn addr_ord_stats(&self, address: String) -> anyhow::Result<UserOrdStats> {
+        Ok(self
+            .store()
             .inscription_db()
-            .iter_scan_reverse(prefix, &[prefix, &[0]].concat())
-            .take(limit)
-            .map(|x| (x.key[prefix.len()..].to_vec(), x.value))
-            .map(|(_, genesis_owner)| {
-                let (genesis, owner) = genesis_owner.split_at(32);
-                (genesis.to_vec(), owner.to_vec())
-            });
+            .get(&db_key!(ADDRESS_TO_ORD_STATS, address.as_bytes()))
+            .map(|x| UserOrdStats::from_raw(&x))
+            .transpose()
+            .anyhow()?
+            .unwrap_or_default())
+    }
 
-        let mut ords = vec![];
-        for (genesis, owner) in iter {
-            let inscription_id = InscriptionId {
-                txid: Txid::from_slice(&genesis).anyhow_as("Failed to parse genesis txid")?,
-                index: 0,
-            };
+    // TODO: avoid duplication
+    pub fn ords(&self, scripthash: String, searcher: &OrdsSearcher) -> anyhow::Result<Vec<Utxo>> {
+        let _timer = self.start_timer("ords");
 
-            let raw_meta = self
-                .store
-                .inscription_db()
-                .get(&db_key!(
+        // update utxo set with new transactions since
+        let newutxos = self.ords_delta(scripthash, searcher).anyhow()?;
+        let mut values = Vec::new();
+
+        for (outpoint, (blockid, value, inscription_id, owner)) in newutxos {
+            let mut inscription_meta: Option<InscriptionMeta> = None;
+
+            if let Some(inscription_id) = inscription_id {
+                let inscription_raw = self.store().inscription_db().get(&db_key!(
                     INSCRIPTION_ID_TO_META,
                     &inscription_id
                         .store()
                         .anyhow_as("Failed to store inscription_id")?
-                ))
-                .anyhow()?;
-            let meta = InscriptionMeta::from_bytes(&raw_meta).anyhow()?;
-            let owner = String::from_utf8(owner.to_vec()).anyhow_as("Owner problem :(")?;
+                ));
+                if let Some(inscription_raw) = inscription_raw {
+                    inscription_meta = Some(
+                        InscriptionMeta::from_raw(&inscription_raw)
+                            .anyhow_as("Failed to decode inscription meta")?,
+                    );
+                }
+            }
 
-            let status = TransactionStatus::from(self.tx_confirming_block(&inscription_id.txid));
-
-            ords.push(Ord {
-                meta,
-                status,
+            values.push(Utxo {
+                txid: outpoint.txid,
+                vout: outpoint.vout,
+                value,
+                confirmed: Some(blockid),
+                inscription_meta,
                 owner,
             });
         }
-
-        Ok(ords)
-    }
-
-    // TODO: avoid duplication
-    pub fn ords(&self, scripthash: String, searcher: &OrdsSearcher) -> Result<Vec<Utxo>> {
-        let _timer = self.start_timer("ords");
-
-        // update utxo set with new transactions since
-        let newutxos = self.ords_utxo(scripthash, searcher).anyhow()?;
-
-        let newutxos = newutxos
-            .into_iter()
-            .map(|(outpoint, (blockid, value, inscription_id, owner))| {
-                // in elements/liquid chains, we have to lookup the txo in order to get its
-                // associated asset. the asset information could be kept in the db history rows
-                // alongside the value to avoid this.
-                #[cfg(feature = "liquid")]
-                let txo = self.lookup_txo(&outpoint).expect("missing utxo");
-
-                let mut inscription_meta: Option<InscriptionMeta> = None;
-
-                if let Some(inscription_id) = inscription_id {
-                    let inscription_raw = self.store().inscription_db().get(&db_key!(
-                        INSCRIPTION_ID_TO_META,
-                        &inscription_id
-                            .store()
-                            .expect("schema.rs:913 - Failed to store inscription_id")
-                    ));
-                    if let Some(inscription_raw) = inscription_raw {
-                        inscription_meta = Some(
-                            InscriptionMeta::from_bytes(&inscription_raw)
-                                .expect("Failed to decode inscription meta"),
-                        );
-                    }
-                }
-
-                Utxo {
-                    txid: outpoint.txid,
-                    vout: outpoint.vout,
-                    value,
-                    confirmed: Some(blockid),
-                    inscription_meta,
-                    owner,
-
-                    #[cfg(feature = "liquid")]
-                    asset: txo.asset,
-                    #[cfg(feature = "liquid")]
-                    nonce: txo.nonce,
-                    #[cfg(feature = "liquid")]
-                    witness: txo.witness,
-                }
-            })
-            .collect_vec();
-
-        Ok(newutxos)
+        Ok(values)
     }
 
     fn ords_iter(
@@ -968,33 +959,19 @@ impl ChainQuery {
         });
 
         for (history, blockid) in history_iter {
-            let genesis_ord = self
-                .store
-                .inscription_db()
-                .get(&db_key!(TXID_IS_INSCRIPTION, &history.get_txid()));
-            if let Some(genesis) = genesis_ord {
-                let inscription_id = InscriptionId {
-                    txid: Txid::from_slice(&genesis[..32]).anyhow_as("Txid parse problem")?,
-                    index: 0,
-                };
+            utxos.push((
+                OutPoint {
+                    txid: history.get_txid(),
+                    vout: 0,
+                },
+                (
+                    blockid,
+                    history.get_value(),
+                    Some(history.get_inscription_id()),
+                    Some(history.get_address()),
+                ),
+            ));
 
-                utxos.push((
-                    OutPoint {
-                        txid: history.get_txid(),
-                        vout: 0,
-                    },
-                    (
-                        blockid,
-                        history.get_value(),
-                        Some(inscription_id),
-                        Some(String::from_utf8(genesis[32..genesis.len() - 4].to_vec()).unwrap()),
-                    ),
-                ));
-            } else {
-                error!("SHIIIIIIIT");
-            }
-
-            // abort if the utxo set size excedees the limit at any point in time
             if utxos.len() == limit {
                 // bail!(ErrorKind::TooPopular)
                 break;
@@ -1004,30 +981,38 @@ impl ChainQuery {
         Ok(utxos)
     }
 
-    pub fn ords_utxo(&self, scripthash: String, searcher: &OrdsSearcher) -> Result<UtxoVec> {
+    pub fn ords_delta(&self, scripthash: String, searcher: &OrdsSearcher) -> Result<UtxoVec> {
         let _timer = self.start_timer("ords_utxo");
 
         match searcher {
-            OrdsSearcher::After(last_seen_txid, limit) => {
+            OrdsSearcher::After(last_seen_txid, limit, search) => {
                 let history_iter = self
-                    .ord_iter_scan_reverse(b'O', scripthash)
+                    .ord_iter_scan_reverse(scripthash)
                     //.map(|x| dbg!(x))
                     .map(OrdHistoryRow::from_row)
+                    .filter(|x| match search {
+                        Some(v) => {
+                            x.value.inscription_id.to_string().starts_with(v)
+                                || x.value.inscription_number.to_string().starts_with(v)
+                        }
+                        None => true,
+                    })
                     .skip_while(|history| last_seen_txid != &history.get_txid()) // skip until we reach the last_seen_txid
                     .skip(1); // skip last_seen_txid
                 self.ords_iter(history_iter, *limit)
             }
-            OrdsSearcher::New(limit) | OrdsSearcher::Pagination(_, limit) => {
+            OrdsSearcher::New(limit, search) => {
                 let history_iter = self
-                    .ord_iter_scan_reverse(b'O', scripthash)
-                    .map(OrdHistoryRow::from_row);
+                    .ord_iter_scan_reverse(scripthash)
+                    .map(OrdHistoryRow::from_row)
+                    .filter(|x| match search {
+                        Some(v) => {
+                            x.value.inscription_id.to_string().starts_with(v)
+                                || x.value.inscription_number.to_string().starts_with(v)
+                        }
+                        None => true,
+                    });
                 self.ords_iter(history_iter, *limit)
-            }
-            OrdsSearcher::All(from_block) => {
-                let history_iter = self
-                    .history_iter_scan(b'O', scripthash.as_bytes(), *from_block)
-                    .map(OrdHistoryRow::from_row);
-                self.ords_iter(history_iter, usize::MAX)
             }
         }
     }
@@ -1873,7 +1858,6 @@ impl TxHistoryRow {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct OrdHistoryKey {
     pub code: u8,
     pub address: String,
@@ -1881,16 +1865,25 @@ pub struct OrdHistoryKey {
     pub txid: Txid,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct OrdHistoryValue {
+    pub value: u64,
+    pub inscription_id: InscriptionId,
+    pub inscription_number: usize,
+}
+
 #[derive(Debug)]
 pub struct OrdHistoryRow {
     pub key: OrdHistoryKey,
-    pub value: u64,
+    pub value: OrdHistoryValue,
 }
 
 impl OrdHistoryRow {
-    pub fn new(address: String, confirmed_height: u32, txid: Txid, value: u64) -> Self {
+    const CODE: u8 = b'O';
+
+    pub fn new(address: String, confirmed_height: u32, txid: Txid, value: OrdHistoryValue) -> Self {
         let key = OrdHistoryKey {
-            code: b'O',
+            code: OrdHistoryRow::CODE,
             address,
             confirmed_height,
             txid,
@@ -1898,16 +1891,17 @@ impl OrdHistoryRow {
         OrdHistoryRow { key, value }
     }
 
-    pub fn filter(code: u8, address: String) -> Bytes {
-        bincode_util::serialize_big(&(code, address.as_bytes())).unwrap()
+    pub fn filter(address: String) -> Bytes {
+        bincode_util::serialize_big(&(OrdHistoryRow::CODE, address.as_bytes())).unwrap()
     }
 
-    pub fn prefix_end(code: u8, address: String) -> Bytes {
-        bincode_util::serialize_big(&(code, address.as_bytes(), std::u32::MAX)).unwrap()
+    pub fn prefix_end(address: String) -> Bytes {
+        bincode_util::serialize_big(&(OrdHistoryRow::CODE, address.as_bytes(), std::u32::MAX))
+            .unwrap()
     }
 
-    pub fn prefix_height(code: u8, address: String, height: u32) -> Bytes {
-        bincode_util::serialize_big(&(code, address.as_bytes(), height)).unwrap()
+    pub fn prefix_height(address: String, height: u32) -> Bytes {
+        bincode_util::serialize_big(&(OrdHistoryRow::CODE, address.as_bytes(), height)).unwrap()
     }
 
     pub fn get_key(&self) -> Vec<u8> {
@@ -1929,12 +1923,28 @@ impl OrdHistoryRow {
         OrdHistoryRow { key, value }
     }
 
+    pub fn value_from_raw(value: &Vec<u8>) -> OrdHistoryValue {
+        bincode_util::deserialize_big(value).expect("Failed to deserialize OrdHistoryValue")
+    }
+
     pub fn get_txid(&self) -> Txid {
         self.key.txid
     }
 
     pub fn get_value(&self) -> u64 {
-        self.value
+        self.value.value
+    }
+
+    pub fn get_address(&self) -> String {
+        self.key.address.clone()
+    }
+
+    pub fn get_inscription_id(&self) -> InscriptionId {
+        self.value.inscription_id
+    }
+
+    pub fn get_inscription_number(&self) -> usize {
+        self.value.inscription_number
     }
 }
 
