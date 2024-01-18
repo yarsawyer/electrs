@@ -857,7 +857,7 @@ fn handle_request(
             Some(&"chain"),
             last_seen_txid,
         ) => {
-            let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
+            to_scripthash(script_type, script_str, config.network_type)?;
             let Some(last_seen_txid) = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok())
             else {
                 let msg = last_seen_txid.map_or("txid is empty".to_owned(), |x| {
@@ -865,10 +865,12 @@ fn handle_request(
                 });
                 return Err(HttpError(StatusCode::UNPROCESSABLE_ENTITY, msg));
             };
-            let searcher = OrdsSearcher::After(last_seen_txid, query.config().utxos_limit);
+            let search = query_params.get("search").map(|x| x.clone());
+            let searcher = OrdsSearcher::After(last_seen_txid, query.config().utxos_limit, search);
             let ords: Vec<UtxoValue> = query
                 .chain()
-                .ords(script_str.to_string(), &searcher)?
+                .ords(script_str.to_string(), &searcher)
+                .map_err(|_| "Unexpected error".to_owned())?
                 .into_iter()
                 .map(UtxoValue::from)
                 .collect();
@@ -926,11 +928,13 @@ fn handle_request(
             None,
             None,
         ) => {
-            let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
-            let searcher = OrdsSearcher::New(query.config().utxos_limit);
+            to_scripthash(script_type, script_str, config.network_type)?;
+            let search = query_params.get("search").map(|x| x.clone());
+            let searcher = OrdsSearcher::New(query.config().utxos_limit, search);
             let utxos: Vec<UtxoValue> = query
                 .chain()
-                .ords(script_str.to_string(), &searcher)?
+                .ords(script_str.to_string(), &searcher)
+                .map_err(|_| "Unexpected error".to_owned())?
                 .into_iter()
                 .map(UtxoValue::from)
                 .collect();
@@ -938,40 +942,34 @@ fn handle_request(
             json_response(utxos, TTL_SHORT)
         }
         // todo update md
-        (&Method::GET, Some(&"discovery"), None, None, None, None) => {
-            let top_ords = query.chain().new_ords(query.config().utxos_limit)?;
-            json_response(top_ords, TTL_SHORT)
-        }
-        // todo update md
-        // (
-        //     &Method::GET,
-        //     Some(script_type @ &"address"),
-        //     Some(script_str),
-        //     Some(&"ords"),
-        //     Some(page),
-        //     None,
-        // )
-        // | (
-        //     &Method::GET,
-        //     Some(script_type @ &"scripthash"),
-        //     Some(script_str),
-        //     Some(&"ords"),
-        //     Some(page),
-        //     None,
-        // ) => {
-        //     let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
-        //     let page = from_str::<usize>(page).map_err(|_| "Page is incorrect".to_owned())?;
-        //     if page == 0 {
-        //         Err("Page is incorrect".to_owned())?;
-        //     }
-        //     let searcher = OrdsSearcher::Pagination(page, query.config().utxos_limit);
-        //     let utxos: Vec<UtxoValue> = query
-        //         .ords(&script_hash[..], &searcher)?
-        //         .into_iter()
-        //         .map(UtxoValue::from)
-        //         .collect();
-        //     json_response(utxos, TTL_SHORT)
+        // (&Method::GET, Some(&"discovery"), None, None, None, None) => {
+        //     let ords = query.chain().discovery(query.config().utxos_limit)?;
+        //     json_response(ords, TTL_SHORT)
         // }
+        (
+            &Method::GET,
+            Some(script_type @ &"address"),
+            Some(address),
+            Some(&"stats"),
+            None,
+            None,
+        )
+        | (
+            &Method::GET,
+            Some(script_type @ &"scripthash"),
+            Some(address),
+            Some(&"stats"),
+            None,
+            None,
+        ) => {
+            to_scripthash(script_type, address, config.network_type)?;
+            json_response(
+                query
+                    .addr_ord_stats(address.to_string())
+                    .map_err(|_| "Unexpected error :(".to_string())?,
+                TTL_SHORT,
+            )
+        }
         (
             &Method::GET,
             Some(script_type @ &"address"),

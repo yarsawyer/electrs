@@ -1,15 +1,16 @@
-use bitcoin::{
-    hashes::hex::{FromHex, ToHex},
-    Txid,
-};
+use bitcoin::{hashes::Hash, Txid};
 
 use crate::{
+    db_key,
     media::Media,
-    new_index::Utxo,
-    util::{errors::AsAnyhow, TransactionStatus},
+    new_index::DBRow,
+    util::{bincode_util, errors::AsAnyhow, TransactionStatus},
 };
 
-use super::InscriptionId;
+use super::{
+    index::{ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, TXID_IS_INSCRIPTION},
+    Entry, InscriptionId,
+};
 
 use {
     bitcoin::{
@@ -63,66 +64,72 @@ impl InscriptionMeta {
         }
     }
 
-    pub(crate) fn from_bytes(data: &'_ [u8]) -> anyhow::Result<Self> {
-        let parsed_str = String::from_utf8(data.to_vec())
-            .anyhow_as("Failed to parse InscriptionMeta from DB")?;
-        let mut split = parsed_str.split(':');
-        let content_type = split
-            .next()
-            .anyhow_as("InscriptionMeta: Failed to parse content_type")?;
-        let content_length: usize = split
-            .next()
-            .anyhow_as("InscriptionMeta: Failed to parse content_length")?
-            .parse()
-            .anyhow_as("InscriptionMeta: Failed to parse content_length")?;
-        let outpoint = Txid::from_hex(
-            split
-                .next()
-                .anyhow_as("InscriptionMeta: Failed to parse outpoint")?,
-        )
-        .anyhow()?;
-
-        let genesis = Txid::from_hex(
-            split
-                .next()
-                .anyhow_as("InscriptionMeta: Failed to parse genesis")?,
-        )
-        .anyhow()?;
-
-        let number = split
-            .next()
-            .anyhow_as("InscriptionMeta: Failed to parse number")?
-            .parse()
-            .anyhow_as("InscriptionMeta: Failed to parse number")?;
-
-        Ok(Self {
-            content_length,
-            content_type: content_type.to_owned(),
-            genesis,
-            outpoint,
-            number,
-            inscription_id: InscriptionId::from(genesis),
-        })
+    pub(crate) fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
+        bincode_util::deserialize_big(value).anyhow_as("Cannot deserialize InscriptionMeta")
     }
 
-    pub(crate) fn into_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        let mut result = String::new();
+    pub(crate) fn to_db_row(&self) -> anyhow::Result<DBRow> {
+        let inscription_id = InscriptionId {
+            index: 0,
+            txid: self.genesis,
+        };
+        Ok(DBRow {
+            key: db_key!(INSCRIPTION_ID_TO_META, &inscription_id.store().anyhow()?),
+            value: bincode_util::serialize_big(self)
+                .anyhow_as("Cannot serialize InscriptionMeta")?,
+        })
+    }
+}
 
-        result.push_str(&self.content_type.to_string());
-        result.push(':');
+#[derive(Deserialize, Serialize, Debug, Default)]
+pub(crate) struct UserOrdStats {
+    pub amount: u64,
+    pub count: u64,
+}
 
-        result.push_str(&self.content_length.to_string());
-        result.push(':');
+impl UserOrdStats {
+    pub(crate) fn new(amount: u64, count: u64) -> Self {
+        Self { amount, count }
+    }
 
-        result.push_str(&self.outpoint.to_hex());
-        result.push(':');
+    pub(crate) fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
+        bincode_util::deserialize_big(value).anyhow_as("Cannot deserialize UserOrdStats")
+    }
 
-        result.push_str(&self.genesis.to_hex());
-        result.push(':');
+    pub(crate) fn to_db_row(&self, owner: &str) -> anyhow::Result<DBRow> {
+        Ok(DBRow {
+            key: db_key!(ADDRESS_TO_ORD_STATS, owner.as_bytes()),
+            value: bincode_util::serialize_big(self).anyhow_as("Cannot serialize UserOrdStats")?,
+        })
+    }
+}
 
-        result.push_str(&self.number.to_string());
+#[derive(Deserialize, Serialize, Debug)]
+pub(crate) struct InscriptionExtraData {
+    pub(crate) genesis: Txid,
+    pub(crate) owner: String,
+    pub(crate) block_height: u32,
+}
 
-        Ok(result.as_bytes().to_vec())
+impl InscriptionExtraData {
+    pub(crate) fn new(genesis: Txid, owner: String, block_height: u32) -> Self {
+        Self {
+            genesis,
+            owner,
+            block_height,
+        }
+    }
+
+    pub(crate) fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
+        bincode_util::deserialize_big(value).anyhow_as("Cannot deserialize InscriptionExtraData")
+    }
+
+    pub(crate) fn to_db_row(&self, last_txid: &Txid) -> anyhow::Result<DBRow> {
+        Ok(DBRow {
+            key: db_key!(TXID_IS_INSCRIPTION, &last_txid.into_inner()),
+            value: bincode_util::serialize_big(self)
+                .anyhow_as("Cannot serialize InscriptionExtraData")?,
+        })
     }
 }
 

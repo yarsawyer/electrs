@@ -87,6 +87,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         store
             .get_block_height(hash)
             .unwrap_or(config.first_inscription_block)
+            - 6
     } else {
         config.first_inscription_block
     };
@@ -162,8 +163,9 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         if current_tip != tip {
             indexer.update(&daemon)?;
             tip = current_tip;
+            let block = store.get_block_height(tip).unwrap() - 6;
             indexer
-                .index_inscription(chain.clone(), InscriptionParseBlock::Hash(tip))
+                .index_inscription(chain.clone(), InscriptionParseBlock::FromHeight(block))
                 .unwrap();
         };
 
