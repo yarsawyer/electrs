@@ -17,7 +17,7 @@ use {bitcoin::consensus::encode, std::str::FromStr};
 
 use bitcoin::blockdata::opcodes;
 use bitcoin::hashes::hex::{FromHex, ToHex};
-use bitcoin::hashes::Error as HashError;
+use bitcoin::hashes::{Error as HashError, Hash};
 use hex::{self, FromHexError};
 
 use hyper::service::{make_service_fn, service_fn};
@@ -1164,11 +1164,10 @@ fn handle_request(
             json_response(query.mempool().backlog_stats(), TTL_SHORT)
         }
         (&Method::GET, Some(&"test"), Some(shit), None, None, None) => {
-            let tx = query
-                .chain()
-                .store()
-                .inscription_db()
-                .get(&db_key!(TXID_IS_INSCRIPTION, shit.as_bytes()));
+            let tx = query.chain().store().inscription_db().get(&db_key!(
+                TXID_IS_INSCRIPTION,
+                &Txid::from_str(shit).unwrap().into_inner()
+            ));
             if let Some(_) = tx {
                 return json_response(json!({ "founded": true }), 0);
             } else {
@@ -1227,11 +1226,9 @@ fn handle_request(
             let recent = mempool.recent_txs_overview();
             json_response(recent, TTL_MEMPOOL_RECENT)
         }
-
         (&Method::GET, Some(&"fee-estimates"), None, None, None, None) => {
             json_response(query.estimate_fee_map(), TTL_SHORT)
         }
-
         (&Method::GET, Some(&"last-price"), None, None, None, None) => {
             #[derive(serde::Serialize)]
             struct J {
