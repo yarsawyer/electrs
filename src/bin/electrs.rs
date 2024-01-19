@@ -186,7 +186,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             let block = store.get_block_height(tip).unwrap();
 
             inscription_updater_small_dick
-                .clean_up_temp_db(block as u32 - SMALL_DICK as u32 - 1)
+                .clean_up_temp_db(block as u32 - SMALL_DICK as u32)
                 .unwrap();
 
             indexer
@@ -196,7 +196,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             indexer
                 .index_inscription(
                     chain.clone(),
-                    InscriptionParseBlock::AtHeight(block - SMALL_DICK - 1),
+                    InscriptionParseBlock::AtHeight(block - SMALL_DICK),
                 )
                 .unwrap();
         };
