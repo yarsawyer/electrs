@@ -1,14 +1,17 @@
+use anyhow::Ok;
 use bitcoin::{hashes::Hash, Txid};
 
 use crate::{
     db_key,
     media::Media,
     new_index::DBRow,
-    util::{bincode_util, errors::AsAnyhow, TransactionStatus},
+    util::{bincode_util, errors::AsAnyhow, Bytes, TransactionStatus},
 };
 
 use super::{
-    index::{ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, TXID_IS_INSCRIPTION},
+    index::{
+        ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, LAST_INSCRIPTION_NUMBER, TXID_IS_INSCRIPTION,
+    },
     Entry, InscriptionId,
 };
 
@@ -19,6 +22,11 @@ use {
     },
     std::str,
 };
+
+fn get_history_key(block_height: u32, owner: String, txid: Txid) -> anyhow::Result<Vec<u8>> {
+    bincode_util::serialize_big(&(b'H', block_height, owner, txid))
+        .anyhow_as("Failed to serialize history key")
+}
 
 const PROTOCOL_ID: &[u8] = b"ord";
 
@@ -36,6 +44,115 @@ pub(crate) struct Ord {
     pub owner: String,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct OrdHistoryKey {
+    pub code: u8,
+    pub address: String,
+    pub confirmed_height: u32,
+    pub txid: Txid,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct OrdHistoryValue {
+    pub value: u64,
+    pub inscription_id: InscriptionId,
+    pub inscription_number: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OrdHistoryRow {
+    pub key: OrdHistoryKey,
+    pub value: OrdHistoryValue,
+}
+
+impl OrdHistoryRow {
+    const CODE: u8 = b'O';
+
+    pub fn new(address: String, confirmed_height: u32, txid: Txid, value: OrdHistoryValue) -> Self {
+        let key = OrdHistoryKey {
+            code: OrdHistoryRow::CODE,
+            address,
+            confirmed_height,
+            txid,
+        };
+        OrdHistoryRow { key, value }
+    }
+
+    pub fn filter(address: String) -> Bytes {
+        bincode_util::serialize_big(&(OrdHistoryRow::CODE, address.as_bytes())).unwrap()
+    }
+
+    pub fn prefix_end(address: String) -> Bytes {
+        bincode_util::serialize_big(&(OrdHistoryRow::CODE, address.as_bytes(), std::u32::MAX))
+            .unwrap()
+    }
+
+    pub fn prefix_height(address: String, height: u32) -> Bytes {
+        bincode_util::serialize_big(&(OrdHistoryRow::CODE, address.as_bytes(), height)).unwrap()
+    }
+
+    pub fn get_key(&self) -> Vec<u8> {
+        bincode_util::serialize_big(&self.key).unwrap()
+    }
+
+    pub fn into_row(self) -> DBRow {
+        DBRow {
+            key: bincode_util::serialize_big(&self.key).unwrap(),
+            value: bincode_util::serialize_big(&self.value).unwrap(),
+        }
+    }
+
+    pub fn from_row(row: DBRow) -> Self {
+        let key =
+            bincode_util::deserialize_big(&row.key).expect("failed to deserialize OrdHistoryKey");
+        let value = bincode_util::deserialize_big(&row.value)
+            .expect("failed to deserialize OrdHistoryValue");
+        OrdHistoryRow { key, value }
+    }
+
+    pub fn value_from_raw(value: &Vec<u8>) -> OrdHistoryValue {
+        bincode_util::deserialize_big(value).expect("Failed to deserialize OrdHistoryValue")
+    }
+
+    pub fn get_txid(&self) -> Txid {
+        self.key.txid
+    }
+
+    pub fn get_value(&self) -> u64 {
+        self.value.value
+    }
+
+    pub fn get_address(&self) -> String {
+        self.key.address.clone()
+    }
+
+    pub fn get_inscription_id(&self) -> InscriptionId {
+        self.value.inscription_id
+    }
+
+    pub fn get_inscription_number(&self) -> u64 {
+        self.value.inscription_number
+    }
+
+    pub fn to_temp_db_row(self, block_height: u32) -> anyhow::Result<DBRow> {
+        Ok(DBRow {
+            key: get_history_key(block_height, self.key.address.clone(), self.key.txid)?,
+            value: bincode_util::serialize_big(&HistoryType::HistoryRow(self))
+                .anyhow_as("Cannot serialize OrdHistoryValue")?,
+        })
+    }
+
+    pub fn from_temp_db_row(value: DBRow) -> anyhow::Result<Self> {
+        let value: HistoryType = bincode_util::deserialize_big(&value.value)
+            .anyhow_as("Cannot deserialize OrdHistoryValue")?;
+
+        match value {
+            HistoryType::HistoryRow(value) => Ok(value),
+            _ => anyhow::bail!("Cannot deserialize OrdHistoryValue"),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct InscriptionMeta {
     pub content_type: String,
@@ -43,16 +160,18 @@ pub struct InscriptionMeta {
     pub outpoint: Txid,
     pub genesis: Txid,
     pub inscription_id: InscriptionId,
-    pub number: usize,
+    pub number: u64,
 }
 
 impl InscriptionMeta {
+    const ERROR_MESSAGE: &'static str = "Cannot deserialize / serialize InscriptionMeta";
+
     pub(crate) fn new(
         content_type: String,
         content_length: usize,
         outpoint: Txid,
         genesis: Txid,
-        number: usize,
+        number: u64,
     ) -> Self {
         Self {
             content_type,
@@ -65,7 +184,7 @@ impl InscriptionMeta {
     }
 
     pub(crate) fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
-        bincode_util::deserialize_big(value).anyhow_as("Cannot deserialize InscriptionMeta")
+        bincode_util::deserialize_big(value).anyhow_as(Self::ERROR_MESSAGE)
     }
 
     pub(crate) fn to_db_row(&self) -> anyhow::Result<DBRow> {
@@ -75,36 +194,90 @@ impl InscriptionMeta {
         };
         Ok(DBRow {
             key: db_key!(INSCRIPTION_ID_TO_META, &inscription_id.store().anyhow()?),
-            value: bincode_util::serialize_big(self)
-                .anyhow_as("Cannot serialize InscriptionMeta")?,
+            value: bincode_util::serialize_big(self).anyhow_as(Self::ERROR_MESSAGE)?,
         })
+    }
+
+    pub(crate) fn to_temp_db_row(
+        self,
+        block_height: u32,
+        owner: String,
+        txid: Txid,
+    ) -> anyhow::Result<DBRow> {
+        Ok(DBRow {
+            key: get_history_key(block_height, owner, txid)?,
+            value: bincode_util::serialize_big(&HistoryType::Meta(self))
+                .anyhow_as(Self::ERROR_MESSAGE)?,
+        })
+    }
+
+    pub(crate) fn from_temp_db_row(value: DBRow) -> anyhow::Result<Self> {
+        let value: HistoryType =
+            bincode_util::deserialize_big(&value.value).anyhow_as(Self::ERROR_MESSAGE)?;
+
+        match value {
+            HistoryType::Meta(value) => Ok(value),
+            _ => anyhow::bail!(Self::ERROR_MESSAGE),
+        }
     }
 }
 
 #[derive(Deserialize, Serialize, Debug, Default)]
-pub(crate) struct UserOrdStats {
+pub struct UserOrdStats {
     pub amount: u64,
     pub count: u64,
 }
 
 impl UserOrdStats {
-    pub(crate) fn new(amount: u64, count: u64) -> Self {
+    const PREFIX: u8 = b'S';
+
+    pub fn new(amount: u64, count: u64) -> Self {
         Self { amount, count }
     }
 
-    pub(crate) fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
+    pub fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
         bincode_util::deserialize_big(value).anyhow_as("Cannot deserialize UserOrdStats")
     }
 
-    pub(crate) fn to_db_row(&self, owner: &str) -> anyhow::Result<DBRow> {
+    pub fn owner_from_key(key: Vec<u8>) -> anyhow::Result<String> {
+        let (_, _, owner): (u8, u32, String) =
+            bincode_util::deserialize_big(&key).anyhow_as("Cannot deserialize key")?;
+        Ok(owner)
+    }
+
+    pub fn to_db_row(&self, owner: &str) -> anyhow::Result<DBRow> {
         Ok(DBRow {
             key: db_key!(ADDRESS_TO_ORD_STATS, owner.as_bytes()),
             value: bincode_util::serialize_big(self).anyhow_as("Cannot serialize UserOrdStats")?,
         })
     }
+
+    pub fn from_temp_db(value: DBRow) -> anyhow::Result<(Self, String)> {
+        let (_, _, owner): (u8, u32, String) =
+            bincode_util::deserialize_big(&value.key).anyhow_as("Cannot deserialize key")?;
+        let (amount, count) = bincode_util::deserialize_big(&value.value)
+            .anyhow_as("Cannot deserialize UserOrdStats")?;
+        Ok((Self { amount, count }, owner))
+    }
+
+    pub fn to_temp_db_row(&self, height: u32, owner: &str) -> anyhow::Result<DBRow> {
+        Ok(DBRow {
+            key: bincode_util::serialize_big(&(Self::PREFIX, height, owner.as_bytes()))
+                .anyhow_as("Cannot serialize UserOrdStats")?,
+            value: bincode_util::serialize_big(&(self.amount, self.count))
+                .anyhow_as("Cannot serialize UserOrdStats")?,
+        })
+    }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) enum HistoryType {
+    Meta(InscriptionMeta),
+    ExtraData(InscriptionExtraData),
+    HistoryRow(OrdHistoryRow),
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub(crate) struct InscriptionExtraData {
     pub(crate) genesis: Txid,
     pub(crate) owner: String,
@@ -112,6 +285,8 @@ pub(crate) struct InscriptionExtraData {
 }
 
 impl InscriptionExtraData {
+    const ERROR_MESSAGE: &'static str = "Cannot deserialize / serialize InscriptionExtraData";
+
     pub(crate) fn new(genesis: Txid, owner: String, block_height: u32) -> Self {
         Self {
             genesis,
@@ -121,15 +296,112 @@ impl InscriptionExtraData {
     }
 
     pub(crate) fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
-        bincode_util::deserialize_big(value).anyhow_as("Cannot deserialize InscriptionExtraData")
+        bincode_util::deserialize_big(value).anyhow_as(Self::ERROR_MESSAGE)
     }
 
     pub(crate) fn to_db_row(&self, last_txid: &Txid) -> anyhow::Result<DBRow> {
         Ok(DBRow {
             key: db_key!(TXID_IS_INSCRIPTION, &last_txid.into_inner()),
-            value: bincode_util::serialize_big(self)
-                .anyhow_as("Cannot serialize InscriptionExtraData")?,
+            value: bincode_util::serialize_big(self).anyhow_as(Self::ERROR_MESSAGE)?,
         })
+    }
+
+    pub(crate) fn from_temp_db(value: DBRow) -> anyhow::Result<Self> {
+        let value: HistoryType =
+            bincode_util::deserialize_big(&value.value).anyhow_as(Self::ERROR_MESSAGE)?;
+
+        match value {
+            HistoryType::ExtraData(value) => Ok(value),
+            _ => anyhow::bail!(Self::ERROR_MESSAGE),
+        }
+    }
+
+    pub(crate) fn to_temp_db_row(&self, txid: Txid, block_height: u32) -> anyhow::Result<DBRow> {
+        Ok(DBRow {
+            key: get_history_key(block_height, self.owner.clone(), txid)?,
+            value: bincode_util::serialize_big(&HistoryType::ExtraData(self.clone()))
+                .anyhow_as(Self::ERROR_MESSAGE)?,
+        })
+    }
+}
+
+pub(crate) struct PartialTxs {
+    pub(crate) txs: Vec<Txid>,
+    pub(crate) last_txid: Txid,
+    pub(crate) block_height: u32,
+}
+
+impl PartialTxs {
+    const TEMP_PREFIX: u8 = b'P';
+    const PREFIX: &'static [u8; 4] = b"PTTT";
+    const ERROR_MESSAGE: &'static str = "Cannot deserialize / serialize PartialTxs";
+
+    pub(crate) fn new(txs: Vec<Txid>, last_txid: Txid, block_height: u32) -> Self {
+        Self {
+            txs,
+            last_txid,
+            block_height,
+        }
+    }
+
+    pub(crate) fn from_temp_db_row(row: DBRow) -> anyhow::Result<Self> {
+        let (_, last_txid, block_height): (u8, Txid, u32) =
+            bincode_util::deserialize_big(&row.key).anyhow_as(Self::ERROR_MESSAGE)?;
+        let txs: Vec<Txid> =
+            bincode_util::deserialize_big(&row.value).anyhow_as(Self::ERROR_MESSAGE)?;
+
+        Ok(Self {
+            txs,
+            last_txid,
+            block_height,
+        })
+    }
+
+    pub(crate) fn to_temp_db_row(&self) -> anyhow::Result<DBRow> {
+        Ok(DBRow {
+            key: bincode_util::serialize_big(&(
+                Self::TEMP_PREFIX,
+                self.last_txid,
+                self.block_height,
+            ))
+            .anyhow_as(Self::ERROR_MESSAGE)?,
+            value: bincode_util::serialize_big(&self.txs).anyhow_as(Self::ERROR_MESSAGE)?,
+        })
+    }
+
+    pub(crate) fn from_db(value: DBRow) -> anyhow::Result<Self> {
+        let (_, txid): ([u8; 4], Txid) =
+            bincode_util::deserialize_big(&value.key).anyhow_as(Self::ERROR_MESSAGE)?;
+
+        let txs: Vec<Txid> =
+            bincode_util::deserialize_big(&value.value).anyhow_as(Self::ERROR_MESSAGE)?;
+
+        Ok(Self {
+            txs,
+            last_txid: txid,
+            block_height: 0,
+        })
+    }
+
+    pub(crate) fn to_db(&self) -> anyhow::Result<DBRow> {
+        Ok(DBRow {
+            key: bincode_util::serialize_big(&(Self::PREFIX, &self.last_txid))
+                .anyhow_as(Self::ERROR_MESSAGE)?,
+            value: bincode_util::serialize_big(&self.txs).anyhow_as(Self::ERROR_MESSAGE)?,
+        })
+    }
+
+    pub(crate) fn get_db_key(&self) -> Vec<u8> {
+        bincode_util::serialize_big(&(Self::PREFIX, self.last_txid)).expect(Self::ERROR_MESSAGE)
+    }
+
+    pub(crate) fn get_temp_db_key(&self, block_height: u32) -> Vec<u8> {
+        bincode_util::serialize_big(&(Self::TEMP_PREFIX, self.last_txid, block_height))
+            .expect(Self::ERROR_MESSAGE)
+    }
+
+    pub(crate) fn push(&mut self, txid: Txid) {
+        self.txs.push(txid);
     }
 }
 
@@ -431,5 +703,62 @@ impl InscriptionParser {
         }
 
         return Some(n);
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LastInscriptionNumber {
+    pub number: u64,
+    pub height: u32,
+}
+
+impl LastInscriptionNumber {
+    const PREFIX: u8 = b'L';
+    pub(crate) fn new(number: u64, height: u32) -> Self {
+        Self { number, height }
+    }
+
+    pub(crate) fn from_temp_db_row(row: DBRow) -> anyhow::Result<Self> {
+        let (_, height): (u8, u32) = bincode_util::deserialize_big(&row.key)
+            .anyhow_as("Cannot deserialize LastInscriptionNumber")?;
+        let number: u64 = bincode_util::deserialize_big(&row.value)
+            .anyhow_as("Cannot deserialize LastInscriptionNumber")?;
+
+        Ok(Self { number, height })
+    }
+
+    pub(crate) fn to_temp_db_row(&self) -> anyhow::Result<DBRow> {
+        Ok(DBRow {
+            key: bincode_util::serialize_big(&(Self::PREFIX, self.height))
+                .anyhow_as("Cannot serialize LastInscriptionNumber")?,
+            value: bincode_util::serialize_big(&self.number)
+                .anyhow_as("Cannot serialize LastInscriptionNumber")?,
+        })
+    }
+
+    pub(crate) fn from_db(value: DBRow) -> anyhow::Result<Self> {
+        let number: u64 = bincode_util::deserialize_big(&value.value)
+            .anyhow_as("Cannot deserialize LastInscriptionNumber")?;
+
+        Ok(Self { number, height: 0 })
+    }
+
+    pub(crate) fn to_db(&self) -> anyhow::Result<DBRow> {
+        Ok(DBRow {
+            key: bincode_util::serialize_big(LAST_INSCRIPTION_NUMBER)
+                .anyhow_as("Cannot serialize LastInscriptionNumber")?,
+            value: bincode_util::serialize_big(&self.number)
+                .anyhow_as("Cannot serialize LastInscriptionNumber")?,
+        })
+    }
+
+    pub(crate) fn get_db_key(&self) -> Vec<u8> {
+        bincode_util::serialize_big(LAST_INSCRIPTION_NUMBER)
+            .expect("Cannot serialize LastInscriptionNumber")
+    }
+
+    pub(crate) fn get_temp_db_key(&self) -> Vec<u8> {
+        bincode_util::serialize_big(&(Self::PREFIX, self.height))
+            .expect("Cannot serialize LastInscriptionNumber")
     }
 }

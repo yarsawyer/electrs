@@ -165,6 +165,17 @@ impl DB {
         self.db.write_opt(batch, &opts).unwrap();
     }
 
+    pub fn delete_batch(&self, rows: impl IntoIterator<Item = Vec<u8>>) {
+        let mut batch = rocksdb::WriteBatch::default();
+        for row in rows {
+            batch.delete(&row);
+        }
+        let mut opts = rocksdb::WriteOptions::new();
+        opts.set_sync(false);
+        opts.disable_wal(true);
+        self.db.write_opt(batch, &opts).unwrap();
+    }
+
     pub fn flush(&self) {
         self.db.flush().unwrap();
     }
