@@ -21,7 +21,7 @@ use crate::daemon::Daemon;
 use crate::inscription_entries::index::{
     ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, PARTIAL_TXID_TO_TXIDS, TXID_IS_INSCRIPTION,
 };
-use crate::inscription_entries::inscription::{Ord, UserOrdStats};
+use crate::inscription_entries::inscription::UserOrdStats;
 use crate::inscription_entries::InscriptionId;
 use crate::inscription_entries::{inscription::InscriptionMeta, Entry};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
@@ -261,7 +261,7 @@ impl Indexer {
         block: InscriptionParseBlock,
     ) -> anyhow::Result<()> {
         let mut inscription_updater =
-            InscriptionUpdater::new(PARTIAL_TXID_TO_TXIDS, self.store.inscription_db())
+            InscriptionUpdater::new(self.store.inscription_db(), self.store.txstore_db())
                 .anyhow()
                 .unwrap();
 
@@ -317,7 +317,6 @@ impl Indexer {
         }
 
         let mut i = last_block_number - blocks.len() as u64;
-        let mut tx_count = 0;
 
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
@@ -325,16 +324,10 @@ impl Indexer {
             };
             let block_number = self.get_block_height(*b_hash).unwrap();
 
-            tx_count += txs.len();
             for tx in txs {
                 let txid = tx.txid();
                 inscription_updater
-                    .index_transaction_inscriptions(
-                        self.store.clone(),
-                        &tx,
-                        txid,
-                        block_number as u32,
-                    )
+                    .index_transaction_inscriptions(&tx, txid, block_number as u32)
                     .unwrap();
             }
 
@@ -342,15 +335,25 @@ impl Indexer {
             if progress_span.is_some() {
                 if i % 10 == 0 {
                     tracing::Span::current().pb_inc(10);
-                    progress_span.as_ref().unwrap().pb_set_message(&format!(
-                        "{i}/{} indexing blocks. tx count: {tx_count}",
-                        last_block_number
-                    ));
+                    progress_span
+                        .as_ref()
+                        .unwrap()
+                        .pb_set_message(&format!("{i}/{} indexing blocks", last_block_number));
                 }
             }
 
             self.store.inscription_db().put(b"ot", &serialize(&b_hash));
         }
+
+        self.start_auto_compactions(&self.store.inscription_db);
+
+        error!(
+            "count of partials: {}",
+            self.store
+                .inscription_db()
+                .iter_scan(PARTIAL_TXID_TO_TXIDS.as_bytes())
+                .count()
+        );
 
         drop(progress_span_);
         drop(progress_span);
@@ -849,48 +852,6 @@ impl ChainQuery {
         }
 
         Ok((utxos, lastblock, processed_items))
-    }
-
-    pub(crate) fn discovery(&self, limit: usize) -> Result<Vec<Ord>> {
-        todo!();
-        // TODO replace txid of genesis tx to inscription_id
-        // let prefix = TXID_IS_INSCRIPTION.as_bytes();
-        // let tx_ids = self
-        //     .store
-        //     .txstore_db()
-        //     .get(&db_key!(b"X", &self.best_hash().into_inner()));
-
-        // if let Some(txs) = tx_ids {
-        //     let tx_ids = bincode_util::deserialize_little::<Vec<Txid>>(&txs)
-        //         .anyhow_as("Failed to deserialize txids")?;
-
-        //     for tx in tx_ids {
-        //         let inscription_id = InscriptionId { txid: tx, index: 0 };
-
-        //         let raw_meta = self
-        //             .store
-        //             .inscription_db()
-        //             .get(&db_key!(
-        //                 INSCRIPTION_ID_TO_META,
-        //                 &inscription_id
-        //                     .store()
-        //                     .anyhow_as("Failed to store inscription_id")?
-        //             ))
-        //             .anyhow()?;
-        //         let meta = InscriptionMeta::from_raw(&raw_meta)
-        //             .anyhow_as("Cannot deserialize inscription meta")?;
-        //         let owner = String::from_utf8(owner.to_vec()).anyhow_as("Owner problem :(")?;
-
-        //         let status =
-        //             TransactionStatus::from(self.tx_confirming_block(&inscription_id.txid));
-
-        //         ords.push(Ord {
-        //             meta,
-        //             status,
-        //             owner,
-        //         });
-        //     }
-        // }
     }
 
     pub(crate) fn addr_ord_stats(&self, address: String) -> anyhow::Result<UserOrdStats> {

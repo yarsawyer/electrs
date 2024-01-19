@@ -150,12 +150,6 @@ impl DB {
     }
 
     pub fn write(&self, mut rows: Vec<DBRow>, flush: DBFlush) {
-        debug!(
-            "writing {} rows to {:?}, flush={:?}",
-            rows.len(),
-            self.db,
-            flush
-        );
         rows.sort_unstable_by(|a, b| a.key.cmp(&b.key));
         let mut batch = rocksdb::WriteBatch::default();
         for row in rows {
