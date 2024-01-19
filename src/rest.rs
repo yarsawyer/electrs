@@ -430,13 +430,13 @@ async fn run_server(config: Arc<Config>, query: Arc<Query>, rx: oneshot::Receive
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;
             loop {
-                info!("fetching balls");
+                trace!("fetching balls");
                 let Some(price) = get_bells_price().await else {
                     error!("Failed to get bell price. Using previous one");
                     tokio::time::sleep(Duration::from_secs(300)).await;
                     continue;
                 };
-                info!("Bells new price: {price} USD");
+                trace!("Bells new price: {price} USD");
                 query.exchange_data.lock().bells_price = Some(price);
                 trace!("Bells price updated");
 

@@ -20,11 +20,13 @@ use electrs::{
     metrics::Metrics,
     new_index::{
         exchange_data::ExchangeData, precache, schema::InscriptionParseBlock, ChainQuery,
-        FetchFrom, Indexer, Mempool, Query, Store,
+        FetchFrom, Indexer, InscriptionUpdater, Mempool, Query, Store,
     },
     rest,
     signal::Waiter,
 };
+
+const SMALL_DICK: usize = 30;
 
 #[cfg(feature = "liquid")]
 use electrs::elements::AssetRegistry;
@@ -67,12 +69,13 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &metrics,
     );
 
-    let last_indexed_block = store
-        .inscription_db()
-        .get(b"ot")
-        .map(|x| bitcoin::consensus::encode::deserialize(&x).expect("invalid chain tip in `ot`"));
+    // let last_indexed_block = store
+    //     .inscription_db()
+    //     .get(b"ot")
+    //     .map(|x| bitcoin::consensus::encode::deserialize(&x).expect("invalid chain tip in `ot`"));
 
     let mut tip = indexer.update(&daemon)?;
+    let tip_height = store.get_block_height(tip).unwrap();
 
     let chain = Arc::new(ChainQuery::new(
         Arc::clone(&store),
@@ -82,18 +85,35 @@ fn run_server(config: Arc<Config>) -> Result<()> {
     ));
 
     //todo: handle this .unwrap() stupid bitch
-    let block_from = if let Some(hash) = last_indexed_block {
-        //let hash = bitcoin::consensus::encode::deserialize(&raw_hash).expect("invalid chain tip in `t`");
-        store
-            .get_block_height(hash)
-            .unwrap_or(config.first_inscription_block)
-            - 6
-    } else {
-        config.first_inscription_block
-    };
+    // let block_from = if let Some(hash) = last_indexed_block {
+    //     //let hash = bitcoin::consensus::encode::deserialize(&raw_hash).expect("invalid chain tip in `t`");
+    //     store
+    //         .get_block_height(hash)
+    //         .unwrap_or(config.first_inscription_block)
+    // } else {
+    //     config.first_inscription_block
+    // };
 
     indexer
-        .index_inscription(chain.clone(), InscriptionParseBlock::FromHeight(block_from))
+        .index_inscription(
+            chain.clone(),
+            InscriptionParseBlock::ToHeight(tip_height - SMALL_DICK),
+        )
+        .unwrap();
+
+    let inscription_updater_small_dick =
+        InscriptionUpdater::new(store.inscription_db(), store.txstore_db(), store.temp_db())
+            .unwrap();
+
+    inscription_updater_small_dick
+        .copy_from_main_block(tip_height as u32 - SMALL_DICK as u32 + 1)
+        .unwrap();
+
+    indexer
+        .index_temp(
+            chain.clone(),
+            InscriptionParseBlock::FromHeight(tip_height - SMALL_DICK + 1),
+        )
         .unwrap();
 
     let mempool = Arc::new(parking_lot::RwLock::new(Mempool::new(
@@ -163,9 +183,21 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         if current_tip != tip {
             indexer.update(&daemon)?;
             tip = current_tip;
-            let block = store.get_block_height(tip).unwrap() - 6;
+            let block = store.get_block_height(tip).unwrap();
+
+            inscription_updater_small_dick
+                .clean_up_temp_db(block as u32 - SMALL_DICK as u32 - 1)
+                .unwrap();
+
             indexer
-                .index_inscription(chain.clone(), InscriptionParseBlock::FromHeight(block))
+                .index_temp(chain.clone(), InscriptionParseBlock::AtHeight(block))
+                .unwrap();
+
+            indexer
+                .index_inscription(
+                    chain.clone(),
+                    InscriptionParseBlock::AtHeight(block - SMALL_DICK - 1),
+                )
                 .unwrap();
         };
 

@@ -19,9 +19,9 @@ use crate::chain::{
 use crate::config::Config;
 use crate::daemon::Daemon;
 use crate::inscription_entries::index::{
-    ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, PARTIAL_TXID_TO_TXIDS, TXID_IS_INSCRIPTION,
+    ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, TXID_IS_INSCRIPTION,
 };
-use crate::inscription_entries::inscription::UserOrdStats;
+use crate::inscription_entries::inscription::{OrdHistoryRow, UserOrdStats};
 use crate::inscription_entries::InscriptionId;
 use crate::inscription_entries::{inscription::InscriptionMeta, Entry};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
@@ -50,18 +50,20 @@ pub enum OrdsSearcher {
 pub struct Store {
     // TODO: should be column families
     txstore_db: DB,
+    temp_db: DB,
     history_db: DB,
     cache_db: DB,
     inscription_db: DB,
     added_blockhashes: parking_lot::RwLock<HashSet<BlockHash>>,
     indexed_blockhashes: parking_lot::RwLock<HashSet<BlockHash>>,
-    indexed_headers: parking_lot::RwLock<HeaderList>,
+    pub indexed_headers: parking_lot::RwLock<HeaderList>,
     outpoint_cache: parking_lot::RwLock<HashMap<OutPoint, u64>>,
 }
 
 impl Store {
     pub fn open(path: &Path, config: &Config) -> Self {
         let txstore_db = DB::open(&path.join("txstore"), config);
+        let temp_db = DB::open(&path.join("temp"), config);
         let added_blockhashes = load_blockhashes(&txstore_db, &BlockRow::done_filter());
         debug!("{} blocks were added", added_blockhashes.len());
 
@@ -88,6 +90,7 @@ impl Store {
 
         Store {
             txstore_db,
+            temp_db,
             history_db,
             cache_db,
             inscription_db,
@@ -100,6 +103,10 @@ impl Store {
 
     pub fn txstore_db(&self) -> &DB {
         &self.txstore_db
+    }
+
+    pub fn temp_db(&self) -> &DB {
+        &self.temp_db
     }
 
     pub fn history_db(&self) -> &DB {
@@ -217,6 +224,7 @@ impl From<&Config> for IndexerConfig {
 pub enum InscriptionParseBlock {
     FromHeight(usize),
     ToHeight(usize),
+    AtHeight(usize),
 }
 
 pub struct ChainQuery {
@@ -255,17 +263,11 @@ impl Indexer {
             .map(|x| x.height())
     }
 
-    pub fn index_inscription(
+    pub fn get_block_by_dick(
         &self,
-        chain: Arc<ChainQuery>,
         block: InscriptionParseBlock,
-    ) -> anyhow::Result<()> {
-        let mut inscription_updater =
-            InscriptionUpdater::new(self.store.inscription_db(), self.store.txstore_db())
-                .anyhow()
-                .unwrap();
-
-        let blocks: Vec<BlockHash> = match block {
+    ) -> anyhow::Result<Vec<BlockHash>> {
+        let short_porn = match block {
             InscriptionParseBlock::FromHeight(height) => self
                 .store
                 .indexed_headers
@@ -275,17 +277,17 @@ impl Indexer {
                 .map(|x| *x.hash())
                 .collect_vec(),
             InscriptionParseBlock::ToHeight(height) => {
-                let last_indexed_block: BlockHash = self
-                    .store
-                    .inscription_db()
-                    .get(b"ot")
-                    .map(|x| {
+                let last_indexed_block: Option<BlockHash> =
+                    self.store.inscription_db().get(b"ot").map(|x| {
                         bitcoin::consensus::encode::deserialize(&x)
                             .expect("invalid chain tip in `ot`")
-                    })
-                    .unwrap();
+                    });
 
-                let last_number = self.get_block_height(last_indexed_block).unwrap();
+                // let last_number = match last_indexed_block {
+                //     Some(v) => self.get_block_height(v).unwrap_or(22490),
+                //     None => 22490,
+                // };
+                let last_number = 44000;
 
                 self.store
                     .indexed_headers
@@ -294,7 +296,66 @@ impl Indexer {
                     .map(|x| *x.hash())
                     .collect()
             }
+            InscriptionParseBlock::AtHeight(height) => vec![*self
+                .store
+                .indexed_headers
+                .read()
+                .header_by_height(height)
+                .unwrap()
+                .hash()],
         };
+
+        Ok(short_porn)
+    }
+
+    pub fn index_temp(
+        &self,
+        chain: Arc<ChainQuery>,
+        block: InscriptionParseBlock,
+    ) -> anyhow::Result<()> {
+        let mut dimas_chlen_inscription_updater = InscriptionUpdater::new(
+            self.store.inscription_db(),
+            self.store.txstore_db(),
+            self.store.temp_db(),
+        )
+        .anyhow()?;
+
+        let blocks = self.get_block_by_dick(block).anyhow()?;
+
+        for b_hash in &blocks {
+            let Some(txs) = chain.get_block_txs(b_hash) else {
+                continue;
+            };
+            let block_number = self.get_block_height(*b_hash).unwrap();
+
+            for tx in txs {
+                let txid = tx.txid();
+                dimas_chlen_inscription_updater
+                    .index_temp_inscriptions(&tx, txid, block_number as u32)
+                    .unwrap();
+            }
+
+            dimas_chlen_inscription_updater
+                .copy_to_next_block(block_number as u32)
+                .anyhow()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn index_inscription(
+        &self,
+        chain: Arc<ChainQuery>,
+        block: InscriptionParseBlock,
+    ) -> anyhow::Result<()> {
+        let mut inscription_updater = InscriptionUpdater::new(
+            self.store.inscription_db(),
+            self.store.txstore_db(),
+            self.store.temp_db(),
+        )
+        .anyhow()?;
+
+        let blocks = self.get_block_by_dick(block).anyhow()?;
 
         let mut progress_span = None;
         let mut progress_span_ = None;
@@ -346,14 +407,6 @@ impl Indexer {
         }
 
         self.start_auto_compactions(&self.store.inscription_db);
-
-        error!(
-            "count of partials: {}",
-            self.store
-                .inscription_db()
-                .iter_scan(PARTIAL_TXID_TO_TXIDS.as_bytes())
-                .count()
-        );
 
         drop(progress_span_);
         drop(progress_span);
@@ -1815,97 +1868,6 @@ impl TxHistoryRow {
     }
     fn get_funded_outpoint(&self) -> OutPoint {
         self.key.txinfo.get_funded_outpoint()
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct OrdHistoryKey {
-    pub code: u8,
-    pub address: String,
-    pub confirmed_height: u32,
-    pub txid: Txid,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct OrdHistoryValue {
-    pub value: u64,
-    pub inscription_id: InscriptionId,
-    pub inscription_number: usize,
-}
-
-#[derive(Debug)]
-pub struct OrdHistoryRow {
-    pub key: OrdHistoryKey,
-    pub value: OrdHistoryValue,
-}
-
-impl OrdHistoryRow {
-    const CODE: u8 = b'O';
-
-    pub fn new(address: String, confirmed_height: u32, txid: Txid, value: OrdHistoryValue) -> Self {
-        let key = OrdHistoryKey {
-            code: OrdHistoryRow::CODE,
-            address,
-            confirmed_height,
-            txid,
-        };
-        OrdHistoryRow { key, value }
-    }
-
-    pub fn filter(address: String) -> Bytes {
-        bincode_util::serialize_big(&(OrdHistoryRow::CODE, address.as_bytes())).unwrap()
-    }
-
-    pub fn prefix_end(address: String) -> Bytes {
-        bincode_util::serialize_big(&(OrdHistoryRow::CODE, address.as_bytes(), std::u32::MAX))
-            .unwrap()
-    }
-
-    pub fn prefix_height(address: String, height: u32) -> Bytes {
-        bincode_util::serialize_big(&(OrdHistoryRow::CODE, address.as_bytes(), height)).unwrap()
-    }
-
-    pub fn get_key(&self) -> Vec<u8> {
-        bincode_util::serialize_big(&self.key).unwrap()
-    }
-
-    pub fn into_row(self) -> DBRow {
-        DBRow {
-            key: bincode_util::serialize_big(&self.key).unwrap(),
-            value: bincode_util::serialize_big(&self.value).unwrap(),
-        }
-    }
-
-    pub fn from_row(row: DBRow) -> Self {
-        let key =
-            bincode_util::deserialize_big(&row.key).expect("failed to deserialize OrdHistoryKey");
-        let value = bincode_util::deserialize_big(&row.value)
-            .expect("failed to deserialize OrdHistoryValue");
-        OrdHistoryRow { key, value }
-    }
-
-    pub fn value_from_raw(value: &Vec<u8>) -> OrdHistoryValue {
-        bincode_util::deserialize_big(value).expect("Failed to deserialize OrdHistoryValue")
-    }
-
-    pub fn get_txid(&self) -> Txid {
-        self.key.txid
-    }
-
-    pub fn get_value(&self) -> u64 {
-        self.value.value
-    }
-
-    pub fn get_address(&self) -> String {
-        self.key.address.clone()
-    }
-
-    pub fn get_inscription_id(&self) -> InscriptionId {
-        self.value.inscription_id
-    }
-
-    pub fn get_inscription_number(&self) -> usize {
-        self.value.inscription_number
     }
 }
 
