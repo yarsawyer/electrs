@@ -222,9 +222,9 @@ impl From<&Config> for IndexerConfig {
 }
 
 pub enum InscriptionParseBlock {
-    FromHeight(usize),
-    ToHeight(usize),
-    AtHeight(usize),
+    FromHeight(u32),
+    ToHeight(u32),
+    AtHeight(u32),
 }
 
 pub struct ChainQuery {
@@ -263,7 +263,7 @@ impl Indexer {
             .map(|x| x.height())
     }
 
-    pub fn get_block_by_dick(
+    pub fn get_blocks_by_height(
         &self,
         block: InscriptionParseBlock,
     ) -> anyhow::Result<Vec<BlockHash>> {
@@ -273,7 +273,7 @@ impl Indexer {
                 .indexed_headers
                 .read()
                 .iter()
-                .skip(height)
+                .skip(height as usize)
                 .map(|x| *x.hash())
                 .collect_vec(),
             InscriptionParseBlock::ToHeight(height) => {
@@ -287,12 +287,13 @@ impl Indexer {
                 //     Some(v) => self.get_block_height(v).unwrap_or(22490),
                 //     None => 22490,
                 // };
+                // ! FOR TESTS
                 let last_number = 44000;
 
                 self.store
                     .indexed_headers
                     .read()
-                    .header_by_range(last_number, height)
+                    .header_by_range(last_number, height as usize)
                     .map(|x| *x.hash())
                     .collect()
             }
@@ -300,7 +301,7 @@ impl Indexer {
                 .store
                 .indexed_headers
                 .read()
-                .header_by_height(height)
+                .header_by_height(height as usize)
                 .unwrap()
                 .hash()],
         };
@@ -313,14 +314,14 @@ impl Indexer {
         chain: Arc<ChainQuery>,
         block: InscriptionParseBlock,
     ) -> anyhow::Result<()> {
-        let mut dimas_chlen_inscription_updater = InscriptionUpdater::new(
+        let mut inscription_updater = InscriptionUpdater::new(
             self.store.inscription_db(),
             self.store.txstore_db(),
             self.store.temp_db(),
         )
         .anyhow()?;
 
-        let blocks = self.get_block_by_dick(block).anyhow()?;
+        let blocks = self.get_blocks_by_height(block).anyhow()?;
 
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
@@ -330,12 +331,12 @@ impl Indexer {
 
             for tx in txs {
                 let txid = tx.txid();
-                dimas_chlen_inscription_updater
+                inscription_updater
                     .index_temp_inscriptions(&tx, txid, block_number as u32)
                     .unwrap();
             }
 
-            dimas_chlen_inscription_updater
+            inscription_updater
                 .copy_to_next_block(block_number as u32)
                 .anyhow()?;
         }
@@ -355,7 +356,7 @@ impl Indexer {
         )
         .anyhow()?;
 
-        let blocks = self.get_block_by_dick(block).anyhow()?;
+        let blocks = self.get_blocks_by_height(block).anyhow()?;
 
         let mut progress_span = None;
         let mut progress_span_ = None;

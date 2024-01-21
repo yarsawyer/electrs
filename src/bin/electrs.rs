@@ -26,7 +26,7 @@ use electrs::{
     signal::Waiter,
 };
 
-const SMALL_DICK: usize = 30;
+const HEIGHT_DELAY: u32 = 30;
 
 #[cfg(feature = "liquid")]
 use electrs::elements::AssetRegistry;
@@ -75,7 +75,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
     //     .map(|x| bitcoin::consensus::encode::deserialize(&x).expect("invalid chain tip in `ot`"));
 
     let mut tip = indexer.update(&daemon)?;
-    let tip_height = store.get_block_height(tip).unwrap();
+    let tip_height = store.get_block_height(tip).unwrap() as u32;
 
     let chain = Arc::new(ChainQuery::new(
         Arc::clone(&store),
@@ -94,25 +94,24 @@ fn run_server(config: Arc<Config>) -> Result<()> {
     //     config.first_inscription_block
     // };
 
+    let block_offset = tip_height - HEIGHT_DELAY;
+
     indexer
-        .index_inscription(
-            chain.clone(),
-            InscriptionParseBlock::ToHeight(tip_height - SMALL_DICK),
-        )
+        .index_inscription(chain.clone(), InscriptionParseBlock::ToHeight(block_offset))
         .unwrap();
 
-    let inscription_updater_small_dick =
+    let inscription_updater =
         InscriptionUpdater::new(store.inscription_db(), store.txstore_db(), store.temp_db())
             .unwrap();
 
-    inscription_updater_small_dick
-        .copy_from_main_block(tip_height as u32 - SMALL_DICK as u32 + 1)
+    inscription_updater
+        .copy_from_main_block(block_offset + 1)
         .unwrap();
 
     indexer
         .index_temp(
             chain.clone(),
-            InscriptionParseBlock::FromHeight(tip_height - SMALL_DICK + 1),
+            InscriptionParseBlock::FromHeight(block_offset + 1),
         )
         .unwrap();
 
@@ -183,10 +182,10 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         if current_tip != tip {
             indexer.update(&daemon)?;
             tip = current_tip;
-            let block = store.get_block_height(tip).unwrap();
+            let block = store.get_block_height(tip).unwrap() as u32;
 
-            inscription_updater_small_dick
-                .clean_up_temp_db(block as u32 - SMALL_DICK as u32)
+            inscription_updater
+                .clean_up_temp_db(block - HEIGHT_DELAY)
                 .unwrap();
 
             indexer
@@ -196,7 +195,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             indexer
                 .index_inscription(
                     chain.clone(),
-                    InscriptionParseBlock::AtHeight(block - SMALL_DICK),
+                    InscriptionParseBlock::AtHeight(block - HEIGHT_DELAY),
                 )
                 .unwrap();
         };
