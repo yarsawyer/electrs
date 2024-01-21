@@ -8,8 +8,8 @@ use crate::{
         },
         inscription::Inscription,
         inscription::{
-            InscriptionExtraData, InscriptionMeta, LastInscriptionNumber, OrdHistoryRow,
-            OrdHistoryValue, ParsedInscription, PartialTxs, UserOrdStats,
+            HistoryAction, InscriptionExtraData, InscriptionMeta, LastInscriptionNumber,
+            OrdHistoryRow, OrdHistoryValue, ParsedInscription, PartialTxs, UserOrdStats,
         },
         inscription_id::InscriptionId,
     },
@@ -364,6 +364,7 @@ impl<'a> InscriptionUpdater<'a> {
 
         Ok(())
     }
+
     pub fn index_temp_inscriptions(
         &mut self,
         tx: &Transaction,
@@ -378,102 +379,102 @@ impl<'a> InscriptionUpdater<'a> {
         }
         .get_db_key();
         let tx_sat = tx.output.first().anyhow()?.value;
-        // if prev_tx.previous_output.vout == 0 {
-        //     if let Some(mut inscription_extra) = self
-        //         .temp_db
-        //         .remove(&db_key!(
-        //             TXID_IS_INSCRIPTION,
-        //             &prev_tx.previous_output.txid.into_inner()
-        //         ))
-        //         .map(|x| InscriptionExtraData::from_raw(&x.to_vec()))
-        //         .transpose()?
-        //     {
-        //         let old_owner = inscription_extra.owner;
+        if prev_tx.previous_output.vout == 0 {
+            if let Some(mut inscription_extra) = self
+                .temp_db
+                .remove(&db_key!(
+                    TXID_IS_INSCRIPTION,
+                    &prev_tx.previous_output.txid.into_inner()
+                ))
+                .map(|x| InscriptionExtraData::from_raw(&x.to_vec()))
+                .transpose()?
+            {
+                let old_owner = inscription_extra.owner;
 
-        //         // Work with old user
-        //         let (prev_history_value, prev_stats) = {
-        //             let old_row = OrdHistoryRow::new(
-        //                 old_owner.clone(),
-        //                 inscription_extra.block_height,
-        //                 prev_tx.previous_output.txid,
-        //                 // Value hardcoded becouse its not needed
-        //                 OrdHistoryValue {
-        //                     value: tx_sat,
-        //                     inscription_id: InscriptionId {
-        //                         txid: inscription_extra.genesis,
-        //                         index: 0,
-        //                     },
-        //                     inscription_number: 0,
-        //                 },
-        //             );
+                // Work with old user
+                let (prev_history_value, prev_stats) = {
+                    let old_row = OrdHistoryRow::new(
+                        old_owner.clone(),
+                        inscription_extra.block_height,
+                        prev_tx.previous_output.txid,
+                        // Value hardcoded becouse its not needed
+                        OrdHistoryValue {
+                            value: tx_sat,
+                            inscription_id: InscriptionId {
+                                txid: inscription_extra.genesis,
+                                index: 0,
+                            },
+                            inscription_number: 0,
+                        },
+                    );
 
-        //             let prev_history_value = self
-        //                 .temp_db
-        //                 .remove(&old_row.get_key())
-        //                 .map(|x| OrdHistoryRow::value_from_raw(&x))
-        //                 .anyhow_as("Failed to find OrdHistoryRow")?;
+                    let prev_history_value = self
+                        .temp_db
+                        .remove(&old_row.get_key())
+                        .map(|x| OrdHistoryRow::value_from_raw(&x))
+                        .anyhow_as("Failed to find OrdHistoryRow")?;
 
-        //             let prev_stats = self
-        //                 .temp_db
-        //                 .remove(&db_key!(ADDRESS_TO_ORD_STATS, old_owner.as_bytes()))
-        //                 .map(|x| UserOrdStats::from_raw(&x))
-        //                 .transpose()?
-        //                 .map(|mut x| {
-        //                     x.count -= 1;
-        //                     x.amount -= tx_sat;
-        //                     x
-        //                 })
-        //                 .anyhow_as("No stats :(")?;
+                    let prev_stats = self
+                        .temp_db
+                        .remove(&db_key!(ADDRESS_TO_ORD_STATS, old_owner.as_bytes()))
+                        .map(|x| UserOrdStats::from_raw(&x))
+                        .transpose()?
+                        .map(|mut x| {
+                            x.count -= 1;
+                            x.amount -= tx_sat;
+                            x
+                        })
+                        .anyhow_as("No stats :(")?;
 
-        //             (prev_history_value, prev_stats)
-        //         };
+                    (prev_history_value, prev_stats)
+                };
 
-        //         // Work with new user
-        //         let (ord_history, new_stats) = {
-        //             let new_owner = tx
-        //                 .output
-        //                 .first()
-        //                 .and_then(|x| {
-        //                     Address::from_script(
-        //                         &x.script_pubkey,
-        //                         bitcoin::network::constants::Network::Bitcoin,
-        //                     )
-        //                 })
-        //                 .map(|x| x.to_string())
-        //                 .anyhow_as("No owner :(")?;
+                // Work with new user
+                let (ord_history, new_stats) = {
+                    let new_owner = tx
+                        .output
+                        .first()
+                        .and_then(|x| {
+                            Address::from_script(
+                                &x.script_pubkey,
+                                bitcoin::network::constants::Network::Bitcoin,
+                            )
+                        })
+                        .map(|x| x.to_string())
+                        .anyhow_as("No owner :(")?;
 
-        //             inscription_extra.owner = new_owner.clone();
-        //             inscription_extra.block_height = block_height;
+                    inscription_extra.owner = new_owner.clone();
+                    inscription_extra.block_height = block_height;
 
-        //             let mut new_stats = self
-        //                 .temp_db
-        //                 .remove(&db_key!(ADDRESS_TO_ORD_STATS, new_owner.as_bytes()))
-        //                 .map(|x| UserOrdStats::from_raw(&x))
-        //                 .transpose()?
-        //                 .unwrap_or_default();
+                    let mut new_stats = self
+                        .temp_db
+                        .remove(&db_key!(ADDRESS_TO_ORD_STATS, new_owner.as_bytes()))
+                        .map(|x| UserOrdStats::from_raw(&x))
+                        .transpose()?
+                        .unwrap_or_default();
 
-        //             new_stats.count += 1;
-        //             new_stats.amount += tx_sat;
+                    new_stats.count += 1;
+                    new_stats.amount += tx_sat;
 
-        //             (
-        //                 OrdHistoryRow::new(new_owner, block_height, txid, prev_history_value),
-        //                 new_stats,
-        //             )
-        //         };
+                    (
+                        OrdHistoryRow::new(new_owner, block_height, txid, prev_history_value),
+                        new_stats,
+                    )
+                };
 
-        //         self.temp_db.write(
-        //             vec![
-        //                 ord_history.into_row(),
-        //                 inscription_extra.to_db_row(&txid)?,
-        //                 prev_stats.to_db_row(&old_owner)?,
-        //                 new_stats.to_db_row(&inscription_extra.owner)?,
-        //             ],
-        //             super::db::DBFlush::Disable,
-        //         );
+                self.temp_db.write(
+                    vec![
+                        ord_history.into_row(),
+                        inscription_extra.to_db_row(&txid)?,
+                        prev_stats.to_db_row(&old_owner)?,
+                        new_stats.to_db_row(&inscription_extra.owner)?,
+                    ],
+                    super::db::DBFlush::Disable,
+                );
 
-        //         return Ok(0);
-        //     };
-        // }
+                return Ok(0);
+            };
+        }
 
         let txs = match self.temp_db.get(partial_prev_key) {
             Some(partial_txids_raw) => {
@@ -600,9 +601,18 @@ impl<'a> InscriptionUpdater<'a> {
 
                 self.temp_db.write(
                     vec![
-                        new_row.to_temp_db_row(block_height)?,
-                        inscription_extra.to_temp_db_row(txid.clone(), block_height)?,
-                        inscription_meta.to_temp_db_row(block_height, owner.clone(), txid)?,
+                        new_row.to_temp_db_row(block_height, HistoryAction::Put)?,
+                        inscription_extra.to_temp_db_row(
+                            txid.clone(),
+                            block_height,
+                            HistoryAction::Put,
+                        )?,
+                        inscription_meta.to_temp_db_row(
+                            block_height,
+                            owner.clone(),
+                            txid,
+                            HistoryAction::Put,
+                        )?,
                         last_inc_n.to_temp_db_row()?,
                         new_stats.to_temp_db_row(block_height, &owner)?,
                     ],

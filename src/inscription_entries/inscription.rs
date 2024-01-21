@@ -1,11 +1,11 @@
 use anyhow::Ok;
-use bitcoin::{hashes::Hash, Txid};
+use bitcoin::{consensus::Decodable, hashes::Hash, Txid};
 
 use crate::{
     db_key,
     media::Media,
-    new_index::DBRow,
-    util::{bincode_util, errors::AsAnyhow, Bytes, TransactionStatus},
+    new_index::{DBRow, DB},
+    util::{bincode_util, errors::AsAnyhow, Bytes, ScriptToAddr, TransactionStatus},
 };
 
 use super::{
@@ -24,8 +24,12 @@ use {
 };
 
 fn get_history_key(block_height: u32, owner: String, txid: Txid) -> anyhow::Result<Vec<u8>> {
-    bincode_util::serialize_big(&(b'H', block_height, owner, txid))
+    bincode_util::serialize_big(&(b'H', owner, block_height, txid))
         .anyhow_as("Failed to serialize history key")
+}
+
+fn deserialize_history_key(key: &Vec<u8>) -> anyhow::Result<(u8, String, u32, Txid)> {
+    bincode_util::deserialize_big(key).anyhow_as("Failed to deserialize history key")
 }
 
 const PROTOCOL_ID: &[u8] = b"ord";
@@ -134,20 +138,24 @@ impl OrdHistoryRow {
         self.value.inscription_number
     }
 
-    pub fn to_temp_db_row(self, block_height: u32) -> anyhow::Result<DBRow> {
+    pub fn to_temp_db_row(
+        self,
+        block_height: u32,
+        history_action: HistoryAction,
+    ) -> anyhow::Result<DBRow> {
         Ok(DBRow {
             key: get_history_key(block_height, self.key.address.clone(), self.key.txid)?,
-            value: bincode_util::serialize_big(&HistoryType::HistoryRow(self))
+            value: bincode_util::serialize_big(&HistoryType::HistoryRow(self, history_action))
                 .anyhow_as("Cannot serialize OrdHistoryValue")?,
         })
     }
 
-    pub fn from_temp_db_row(value: DBRow) -> anyhow::Result<Self> {
+    pub fn from_temp_db_row(value: DBRow) -> anyhow::Result<(Self, HistoryAction)> {
         let value: HistoryType = bincode_util::deserialize_big(&value.value)
             .anyhow_as("Cannot deserialize OrdHistoryValue")?;
 
         match value {
-            HistoryType::HistoryRow(value) => Ok(value),
+            HistoryType::HistoryRow(value, history_action) => Ok((value, history_action)),
             _ => anyhow::bail!("Cannot deserialize OrdHistoryValue"),
         }
     }
@@ -203,20 +211,21 @@ impl InscriptionMeta {
         block_height: u32,
         owner: String,
         txid: Txid,
+        history_action: HistoryAction,
     ) -> anyhow::Result<DBRow> {
         Ok(DBRow {
             key: get_history_key(block_height, owner, txid)?,
-            value: bincode_util::serialize_big(&HistoryType::Meta(self))
+            value: bincode_util::serialize_big(&HistoryType::Meta(self, history_action))
                 .anyhow_as(Self::ERROR_MESSAGE)?,
         })
     }
 
-    pub(crate) fn from_temp_db_row(value: DBRow) -> anyhow::Result<Self> {
+    pub(crate) fn from_temp_db_row(value: DBRow) -> anyhow::Result<(Self, HistoryAction)> {
         let value: HistoryType =
             bincode_util::deserialize_big(&value.value).anyhow_as(Self::ERROR_MESSAGE)?;
 
         match value {
-            HistoryType::Meta(value) => Ok(value),
+            HistoryType::Meta(value, history_action) => Ok((value, history_action)),
             _ => anyhow::bail!(Self::ERROR_MESSAGE),
         }
     }
@@ -271,10 +280,16 @@ impl UserOrdStats {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub(crate) enum HistoryAction {
+    Put,
+    Remove,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum HistoryType {
-    Meta(InscriptionMeta),
-    ExtraData(InscriptionExtraData),
-    HistoryRow(OrdHistoryRow),
+    Meta(InscriptionMeta, HistoryAction),
+    ExtraData(InscriptionExtraData, HistoryAction),
+    HistoryRow(OrdHistoryRow, HistoryAction),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -306,22 +321,119 @@ impl InscriptionExtraData {
         })
     }
 
-    pub(crate) fn from_temp_db(value: DBRow) -> anyhow::Result<Self> {
+    pub(crate) fn from_temp_db(value: DBRow) -> anyhow::Result<(Self, HistoryAction)> {
         let value: HistoryType =
             bincode_util::deserialize_big(&value.value).anyhow_as(Self::ERROR_MESSAGE)?;
 
         match value {
-            HistoryType::ExtraData(value) => Ok(value),
+            HistoryType::ExtraData(value, history_action) => Ok((value, history_action)),
             _ => anyhow::bail!(Self::ERROR_MESSAGE),
         }
     }
 
-    pub(crate) fn to_temp_db_row(&self, txid: Txid, block_height: u32) -> anyhow::Result<DBRow> {
+    pub(crate) fn full_from_temp_db(value: DBRow) -> anyhow::Result<(Self, HistoryAction, Txid)> {
+        let (_, _, _, txid) = deserialize_history_key(&value.key)?;
+        let value: HistoryType =
+            bincode_util::deserialize_big(&value.value).anyhow_as(Self::ERROR_MESSAGE)?;
+
+        match value {
+            HistoryType::ExtraData(value, history_action) => Ok((value, history_action, txid)),
+            _ => anyhow::bail!(Self::ERROR_MESSAGE),
+        }
+    }
+
+    pub(crate) fn to_temp_db_row(
+        &self,
+        txid: Txid,
+        block_height: u32,
+        history_action: HistoryAction,
+    ) -> anyhow::Result<DBRow> {
         Ok(DBRow {
             key: get_history_key(block_height, self.owner.clone(), txid)?,
-            value: bincode_util::serialize_big(&HistoryType::ExtraData(self.clone()))
-                .anyhow_as(Self::ERROR_MESSAGE)?,
+            value: bincode_util::serialize_big(&HistoryType::ExtraData(
+                self.clone(),
+                history_action,
+            ))
+            .anyhow_as(Self::ERROR_MESSAGE)?,
         })
+    }
+
+    pub(crate) fn remove_from_dbs(
+        txid: &Txid,
+        temp_db: &DB,
+        txstore_db: &DB,
+        inscription_db: &DB,
+        last_block_height: u32,
+        prev_txid: &Txid,
+    ) -> anyhow::Result<Option<Self>> {
+        let main_inscription = inscription_db
+            .get(&db_key!(TXID_IS_INSCRIPTION, &txid.into_inner()))
+            .map(|value| Self::from_raw(&value))
+            .transpose()?;
+
+        let owner = match main_inscription.clone() {
+            Some(main_inscription) => Some(main_inscription.owner),
+            None => {
+                let tx_result = txstore_db
+                    .get(&db_key!("T", &prev_txid.into_inner()))
+                    .anyhow()?;
+                let decoded =
+                    bitcoin::Transaction::consensus_decode(std::io::Cursor::new(tx_result))?;
+                decoded
+                    .output
+                    .first()
+                    .unwrap()
+                    .script_pubkey
+                    .to_address_str(crate::chain::Network::Bellscoin)
+            }
+        };
+
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
+
+        let mut history_items = vec![];
+
+        for i in last_block_height - 30..last_block_height {
+            let key = get_history_key(i, owner.clone(), *txid)?;
+            if let Some(anyhow::Result::Ok(value)) = temp_db.get(&key).map(|x| {
+                Self::from_temp_db(DBRow {
+                    key: vec![],
+                    value: x,
+                })
+            }) {
+                history_items.push((value.0, value.1, i));
+            };
+        }
+
+        let mut result = {
+            if main_inscription.is_some() {
+                Some(main_inscription.clone().unwrap())
+            } else {
+                None
+            }
+        };
+
+        for i in history_items {
+            match i.1 {
+                HistoryAction::Put => {
+                    if result.is_some() {
+                        unreachable!()
+                    }
+
+                    let row =
+                        i.0.to_temp_db_row(*txid, i.2, i.1)
+                            .anyhow_as("Cannot create temp db row")?;
+                    temp_db.remove(&row.key);
+                    result = Some(i.0)
+                }
+                _ => {
+                    unreachable!()
+                }
+            }
+        }
+
+        Ok(result)
     }
 }
 
