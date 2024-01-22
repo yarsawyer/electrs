@@ -16,7 +16,7 @@ use std::{
 
 pub(crate) use self::{
     deserialize_from_str::DeserializeFromStr,
-    entry::{Entry, OutPointValue},
+    entry::Entry,
     epoch::Epoch,
     height::Height,
     inscription::{Inscription, ParsedInscription},

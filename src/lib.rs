@@ -26,10 +26,12 @@ pub mod config;
 pub mod daemon;
 pub mod electrum;
 pub mod errors;
+mod inscription_entries;
+mod media;
 pub mod metrics;
 pub mod new_index;
 pub mod rest;
 pub mod signal;
 pub mod util;
-mod media;
-mod inscription_entries;
+
+pub use self::config::HEIGHT_DELAY;

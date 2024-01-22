@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use bitcoin::consensus::encode::{deserialize, serialize};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::path::Path;
 use std::sync::Arc;
@@ -267,7 +267,7 @@ impl Indexer {
         &self,
         block: InscriptionParseBlock,
     ) -> anyhow::Result<Vec<BlockHash>> {
-        let short_porn = match block {
+        let blocks = match block {
             InscriptionParseBlock::FromHeight(height) => self
                 .store
                 .indexed_headers
@@ -288,7 +288,7 @@ impl Indexer {
                 //     None => 22490,
                 // };
                 // ! FOR TESTS
-                let last_number = 44000;
+                let last_number = 40000;
 
                 self.store
                     .indexed_headers
@@ -306,7 +306,7 @@ impl Indexer {
                 .hash()],
         };
 
-        Ok(short_porn)
+        Ok(blocks)
     }
 
     pub fn index_temp(
@@ -327,12 +327,19 @@ impl Indexer {
             let Some(txs) = chain.get_block_txs(b_hash) else {
                 continue;
             };
+
             let block_number = self.get_block_height(*b_hash).unwrap();
 
             for tx in txs {
                 let txid = tx.txid();
                 inscription_updater
-                    .index_temp_inscriptions(&tx, txid, block_number as u32)
+                    .index_transaction_inscriptions(
+                        &tx,
+                        txid,
+                        block_number as u32,
+                        true,
+                        &mut HashMap::new(),
+                    )
                     .unwrap();
             }
 
@@ -380,32 +387,41 @@ impl Indexer {
 
         let mut i = last_block_number - blocks.len() as u64;
 
+        let mut cache = HashMap::with_capacity(1_000_000);
+
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
                 continue;
             };
+            cache.extend(txs.iter().map(|x| (x.txid(), x.clone())));
             let block_number = self.get_block_height(*b_hash).unwrap();
 
             for tx in txs {
                 let txid = tx.txid();
                 inscription_updater
-                    .index_transaction_inscriptions(&tx, txid, block_number as u32)
+                    .index_transaction_inscriptions(
+                        &tx,
+                        txid,
+                        block_number as u32,
+                        false,
+                        &mut cache,
+                    )
                     .unwrap();
             }
 
             i += 1;
             if progress_span.is_some() {
-                if i % 10 == 0 {
-                    tracing::Span::current().pb_inc(10);
-                    progress_span
-                        .as_ref()
-                        .unwrap()
-                        .pb_set_message(&format!("{i}/{} indexing blocks", last_block_number));
-                }
+                tracing::Span::current().pb_inc(1);
+                progress_span
+                    .as_ref()
+                    .unwrap()
+                    .pb_set_message(&format!("{i}/{} indexing blocks", last_block_number));
             }
 
             self.store.inscription_db().put(b"ot", &serialize(&b_hash));
         }
+
+        drop(cache);
 
         self.start_auto_compactions(&self.store.inscription_db);
 
@@ -454,7 +470,7 @@ impl Indexer {
         Ok(result)
     }
 
-    pub fn update(&mut self, daemon: &Daemon) -> Result<BlockHash> {
+    pub fn update(&mut self, daemon: &Daemon) -> Result<(BlockHash, Vec<HeaderEntry>)> {
         let daemon = daemon.reconnect()?;
         let tip = daemon.getbestblockhash()?;
         let new_headers = self.get_new_headers(&daemon, &tip)?;
@@ -490,7 +506,7 @@ impl Indexer {
         self.store.txstore_db.put_sync(b"t", &serialize(&tip));
 
         let mut headers = self.store.indexed_headers.write();
-        headers.apply(new_headers);
+        let removed = headers.apply(new_headers);
         assert_eq!(tip, *headers.tip());
 
         if let FetchFrom::BlkFiles = self.from {
@@ -499,7 +515,7 @@ impl Indexer {
 
         self.tip_metric.set(headers.len() as i64 - 1);
 
-        Ok(tip)
+        Ok((tip, removed))
     }
 
     fn add(&self, blocks: &[BlockEntry]) {
@@ -908,7 +924,7 @@ impl ChainQuery {
         Ok((utxos, lastblock, processed_items))
     }
 
-    pub(crate) fn addr_ord_stats(&self, address: String) -> anyhow::Result<UserOrdStats> {
+    pub fn addr_ord_stats(&self, address: String) -> anyhow::Result<UserOrdStats> {
         Ok(self
             .store()
             .inscription_db()
@@ -967,9 +983,6 @@ impl ChainQuery {
 
         let history_iter = history_iter.filter_map(|history| {
             self.tx_confirming_block(&history.get_txid())
-                // drop history entries that were previously confirmed in a re-orged block and later
-                // confirmed again at a different height
-                .filter(|blockid| blockid.height == history.key.confirmed_height as usize)
                 .map(|b| (history, b))
         });
 
@@ -1697,7 +1710,7 @@ struct BlockKey {
     hash: FullHash,
 }
 
-struct BlockRow {
+pub struct BlockRow {
     key: BlockKey,
     value: Bytes, // serialized output
 }
@@ -1738,7 +1751,7 @@ impl BlockRow {
         b"B".to_vec()
     }
 
-    fn txids_key(hash: FullHash) -> Bytes {
+    pub fn txids_key(hash: FullHash) -> Bytes {
         [b"X", &hash[..]].concat()
     }
 

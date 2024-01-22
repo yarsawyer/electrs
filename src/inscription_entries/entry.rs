@@ -6,7 +6,7 @@ use crate::util::errors::AsAnyhow;
 
 use super::*;
 
-pub(crate) trait Entry: Sized {
+pub trait Entry: Sized {
     type Value;
 
     fn load(value: Self::Value) -> Result<Self>;
@@ -14,7 +14,7 @@ pub(crate) trait Entry: Sized {
     fn store(self) -> Result<Self::Value>;
 }
 
-pub(super) type BlockHashValue = [u8; 32];
+pub type BlockHashValue = [u8; 32];
 
 impl Entry for BlockHash {
     type Value = BlockHashValue;
@@ -28,15 +28,15 @@ impl Entry for BlockHash {
     }
 }
 
-pub(crate) struct InscriptionEntry {
-    pub(crate) fee: u64,
-    pub(crate) height: u64,
-    pub(crate) number: u64,
-    pub(crate) sat: Option<Sat>,
-    pub(crate) timestamp: u32,
+pub struct InscriptionEntry {
+    pub fee: u64,
+    pub height: u64,
+    pub number: u64,
+    pub sat: Option<Sat>,
+    pub timestamp: u32,
 }
 
-pub(crate) type InscriptionEntryValue = (u64, u64, u64, u128, u32);
+pub type InscriptionEntryValue = (u64, u64, u64, u128, u32);
 
 impl Entry for InscriptionEntry {
     type Value = InscriptionEntryValue;
@@ -69,7 +69,7 @@ impl Entry for InscriptionEntry {
     }
 }
 
-pub(crate) type InscriptionIdValue = [u8; 36];
+pub type InscriptionIdValue = [u8; 36];
 
 impl Entry for InscriptionId {
     type Value = InscriptionIdValue;
@@ -102,7 +102,8 @@ impl Entry for OutPoint {
 
     fn store(self) -> Result<Self::Value> {
         let mut value = [0; 36];
-        self.consensus_encode(&mut value.as_mut_slice()).track_err()?;
+        self.consensus_encode(&mut value.as_mut_slice())
+            .track_err()?;
         Ok(value)
     }
 }
@@ -118,12 +119,13 @@ impl Entry for SatPoint {
 
     fn store(self) -> Result<Self::Value> {
         let mut value = [0; 44];
-        self.consensus_encode(&mut value.as_mut_slice()).track_err()?;
+        self.consensus_encode(&mut value.as_mut_slice())
+            .track_err()?;
         Ok(value)
     }
 }
 
-pub(crate) type SatRange = (u128, u128);
+pub type SatRange = (u128, u128);
 
 impl Entry for SatRange {
     type Value = [u8; 24];
