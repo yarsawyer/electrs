@@ -615,10 +615,10 @@ impl ChainQuery {
             };
 
             // abort if the utxo set size excedees the limit at any point in time
-            if utxos.len() > limit {
+            //if utxos.len() > limit {
                 //bail!(ErrorKind::TooPopular)
-                break;
-            }
+            //    break;
+            //}
         }
 
         Ok((utxos, lastblock, processed_items))
