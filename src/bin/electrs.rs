@@ -24,9 +24,8 @@ use electrs::{
     },
     rest,
     signal::Waiter,
+    HEIGHT_DELAY,
 };
-
-const HEIGHT_DELAY: u32 = 30;
 
 #[cfg(feature = "liquid")]
 use electrs::elements::AssetRegistry;
@@ -74,7 +73,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
     //     .get(b"ot")
     //     .map(|x| bitcoin::consensus::encode::deserialize(&x).expect("invalid chain tip in `ot`"));
 
-    let mut tip = indexer.update(&daemon)?;
+    let (mut tip, _) = indexer.update(&daemon)?;
     let tip_height = store.get_block_height(tip).unwrap() as u32;
 
     let chain = Arc::new(ChainQuery::new(
@@ -180,23 +179,23 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         // Index new blocks
         let current_tip = daemon.getbestblockhash()?;
         if current_tip != tip {
-            indexer.update(&daemon)?;
+            let (_, removed) = indexer.update(&daemon)?;
+
+            if !removed.is_empty() {
+                inscription_updater
+                    .remove_blocks(removed)
+                    .expect("Something went wrong with removing blocks dickus");
+            }
+
             tip = current_tip;
             let block = store.get_block_height(tip).unwrap() as u32;
 
             inscription_updater
-                .clean_up_temp_db(block - HEIGHT_DELAY)
+                .remove_temp_data_orhpan(block - HEIGHT_DELAY)
                 .unwrap();
 
             indexer
                 .index_temp(chain.clone(), InscriptionParseBlock::AtHeight(block))
-                .unwrap();
-
-            indexer
-                .index_inscription(
-                    chain.clone(),
-                    InscriptionParseBlock::AtHeight(block - HEIGHT_DELAY),
-                )
                 .unwrap();
         };
 
