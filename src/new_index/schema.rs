@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use bitcoin::consensus::encode::{deserialize, serialize};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use crate::daemon::Daemon;
 use crate::inscription_entries::index::{
     ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, TXID_IS_INSCRIPTION,
 };
-use crate::inscription_entries::inscription::{OrdHistoryRow, UserOrdStats};
+use crate::inscription_entries::inscription::{OrdHistoryRow, PartialTxs, UserOrdStats};
 use crate::inscription_entries::InscriptionId;
 use crate::inscription_entries::{inscription::InscriptionMeta, Entry};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
@@ -288,7 +288,7 @@ impl Indexer {
                 //     None => 22490,
                 // };
                 // ! FOR TESTS
-                let last_number = 40000;
+                let last_number = 24700;
 
                 self.store
                     .indexed_headers
@@ -331,15 +331,8 @@ impl Indexer {
             let block_number = self.get_block_height(*b_hash).unwrap();
 
             for tx in txs {
-                let txid = tx.txid();
                 inscription_updater
-                    .index_transaction_inscriptions(
-                        &tx,
-                        txid,
-                        block_number as u32,
-                        true,
-                        &mut HashMap::new(),
-                    )
+                    .index_transaction_inscriptions(tx, block_number as u32, true, None, None)
                     .unwrap();
             }
 
@@ -387,7 +380,10 @@ impl Indexer {
 
         let mut i = last_block_number - blocks.len() as u64;
 
-        let mut cache = HashMap::with_capacity(1_000_000);
+        let mut cache = HashMap::with_capacity(1_000);
+        let mut partial_cache = HashMap::with_capacity(1_000);
+
+        let mut long_inscriptions = 0;
 
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
@@ -396,17 +392,21 @@ impl Indexer {
             cache.extend(txs.iter().map(|x| (x.txid(), x.clone())));
             let block_number = self.get_block_height(*b_hash).unwrap();
 
-            for tx in txs {
-                let txid = tx.txid();
-                inscription_updater
-                    .index_transaction_inscriptions(
-                        &tx,
-                        txid,
-                        block_number as u32,
-                        false,
-                        &mut cache,
-                    )
-                    .unwrap();
+            for mut txs in Self::chunk_transactions(txs) {
+                if txs.len() == 1 {
+                    inscription_updater
+                        .index_transaction_inscriptions(
+                            txs.pop().unwrap(),
+                            block_number as u32,
+                            false,
+                            Some(&mut cache),
+                            Some(&mut partial_cache),
+                        )
+                        .unwrap();
+                } else {
+                    long_inscriptions += 1;
+                    // ! SHIT
+                }
             }
 
             i += 1;
@@ -421,6 +421,26 @@ impl Indexer {
             self.store.inscription_db().put(b"ot", &serialize(&b_hash));
         }
 
+        dbg!(cache.len());
+        dbg!(partial_cache.len());
+        dbg!(long_inscriptions);
+
+        if partial_cache.len() > 0 {
+            let to_write = partial_cache
+                .into_iter()
+                .map(|(last_txid, txs)| {
+                    PartialTxs {
+                        block_height: 0,
+                        last_txid,
+                        txs,
+                    }
+                    .to_db()
+                    .expect("Failed to serialize partials")
+                })
+                .collect();
+            self.store.inscription_db.write(to_write, DBFlush::Disable);
+        }
+
         drop(cache);
 
         self.start_auto_compactions(&self.store.inscription_db);
@@ -429,6 +449,31 @@ impl Indexer {
         drop(progress_span);
 
         Ok(())
+    }
+
+    fn chunk_transactions(transactions: Vec<Transaction>) -> Vec<Vec<Transaction>> {
+        let mut chunks: Vec<Vec<Transaction>> = Vec::new();
+        let mut outpoints: HashMap<Txid, Vec<Transaction>> = HashMap::new();
+
+        for tx in transactions.iter().rev() {
+            if let Some(v) = outpoints.remove(&tx.input[0].previous_output.txid) {
+                let mut res = v.clone();
+                res.push(tx.clone());
+                outpoints.insert(tx.txid(), res);
+            } else {
+                outpoints.insert(tx.txid(), vec![tx.clone()]);
+            }
+        }
+
+        for i in transactions.into_iter() {
+            if let Some(v) = outpoints.get(&i.txid()) {
+                chunks.push(v.clone());
+            } else {
+                continue;
+            }
+        }
+
+        chunks
     }
 
     fn headers_to_add(&self, new_headers: &[HeaderEntry]) -> Vec<HeaderEntry> {

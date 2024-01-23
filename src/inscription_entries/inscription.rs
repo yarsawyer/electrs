@@ -1,5 +1,8 @@
+use std::convert::TryInto;
+
 use anyhow::Ok;
 use bitcoin::{hashes::Hash, Txid};
+use itertools::Itertools;
 
 use crate::{
     db_key,
@@ -332,13 +335,15 @@ pub struct PartialTxs {
 }
 
 impl PartialTxs {
-    const ERROR_MESSAGE: &'static str = "Cannot deserialize / serialize PartialTxs";
-
     pub fn from_db(value: DBRow) -> anyhow::Result<Self> {
         let txid = Txid::from_slice(&value.key[4..])?;
 
-        let txs: Vec<Txid> =
-            bincode_util::deserialize_big(&value.value).anyhow_as(Self::ERROR_MESSAGE)?;
+        let txs: Vec<Txid> = value
+            .value
+            .chunks(32)
+            .map(|x| Txid::from_slice(x))
+            .try_collect()
+            .anyhow_as("Failed to decode transactions")?;
 
         Ok(Self {
             txs,
@@ -350,7 +355,12 @@ impl PartialTxs {
     pub fn to_db(&self) -> anyhow::Result<DBRow> {
         Ok(DBRow {
             key: self.get_db_key(),
-            value: bincode_util::serialize_big(&self.txs).anyhow_as(Self::ERROR_MESSAGE)?,
+            value: self
+                .txs
+                .iter()
+                .map(|x| x.into_inner())
+                .collect_vec()
+                .concat(),
         })
     }
 
@@ -359,30 +369,50 @@ impl PartialTxs {
     }
 
     pub fn get_temp_iter_key(block_height: u32) -> Vec<u8> {
-        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, block_height)).unwrap()
+        db_key!(PARTIAL_TXID_TO_TXIDS, &block_height.to_be_bytes())
     }
 
     pub fn get_temp_db_key(block_height: u32, txid: &Txid) -> Vec<u8> {
-        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, block_height, txid)).unwrap()
+        db_key!(
+            PARTIAL_TXID_TO_TXIDS,
+            &[&block_height.to_be_bytes(), txid.into_inner().as_slice()].concat()
+        )
     }
 
     pub fn to_temp_db_row(&self) -> anyhow::Result<DBRow> {
         Ok(DBRow {
             key: Self::get_temp_db_key(self.block_height, &self.last_txid),
-            value: bincode_util::serialize_big(&self.txs).anyhow_as(Self::ERROR_MESSAGE)?,
+            value: self
+                .txs
+                .iter()
+                .map(|x| x.into_inner())
+                .collect_vec()
+                .concat(),
         })
     }
 
     pub fn from_temp_db(row: DBRow) -> anyhow::Result<Self> {
-        let (_, block_height, txid): ([u8; PARTIAL_TXID_TO_TXIDS.len()], u32, Txid) =
-            bincode_util::deserialize_big(&row.key).anyhow_as(Self::ERROR_MESSAGE)?;
+        let partial_len = PARTIAL_TXID_TO_TXIDS.len();
 
-        let txs: Vec<Txid> =
-            bincode_util::deserialize_big(&row.value).anyhow_as(Self::ERROR_MESSAGE)?;
+        let block_height = u32::from_be_bytes(
+            row.key[partial_len..partial_len + 4]
+                .try_into()
+                .anyhow_as("Failed to decode block height")?,
+        );
+
+        let last_txid = Txid::from_slice(&row.key[partial_len + 4..])
+            .anyhow_as("Failed to decode last_txid")?;
+
+        let txs: Vec<Txid> = row
+            .value
+            .chunks(32)
+            .map(|x| Txid::from_slice(x))
+            .try_collect()
+            .anyhow_as("Failed to decode transactions")?;
 
         Ok(Self {
             txs,
-            last_txid: txid,
+            last_txid,
             block_height,
         })
     }
