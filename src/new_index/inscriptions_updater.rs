@@ -19,7 +19,6 @@ use bitcoin::{hashes::Hash, Transaction, Txid};
 use itertools::Itertools;
 
 use super::{schema::BlockRow, DBRow, DB};
-
 pub struct InscriptionUpdater<'a> {
     inscription_db: &'a DB,
     tx_db: &'a DB,
@@ -37,12 +36,13 @@ impl<'a> InscriptionUpdater<'a> {
 
     pub fn index_transaction_inscriptions(
         &mut self,
-        tx: &Transaction,
-        txid: Txid,
+        tx: Transaction,
         block_height: u32,
         is_temp: bool,
-        cache: &mut HashMap<Txid, Transaction>,
+        mut cache: Option<&mut HashMap<Txid, Transaction>>,
+        mut partials_cache: Option<&mut HashMap<Txid, Vec<Txid>>>,
     ) -> Result<u64> {
+        let txid = tx.txid();
         let previous_txid = tx.input[0].previous_output.txid;
         let tx_sat = tx.output.first().anyhow()?.value;
         let prev_tx = tx.input.first().anyhow_as("No inputs :(")?.previous_output;
@@ -56,12 +56,7 @@ impl<'a> InscriptionUpdater<'a> {
                 .map(|x| InscriptionExtraData::from_raw(&x.to_vec()))
                 .transpose()?
             {
-                if is_temp {
-                    to_temp_write
-                        .push(inscription_extra.to_temp_db_row(block_height, &previous_txid)?);
-                }
-
-                let old_owner = inscription_extra.owner;
+                let old_owner = inscription_extra.owner.clone();
 
                 // Work with old user
                 let prev_history_value = {
@@ -89,8 +84,11 @@ impl<'a> InscriptionUpdater<'a> {
                         to_temp_write.push(DBRow {
                             key: old_row.get_temp_db_key(block_height),
                             value: prev_history_value.get_raw(),
-                        })
+                        });
+                        to_temp_write
+                            .push(inscription_extra.to_temp_db_row(block_height, &previous_txid)?);
                     }
+
                     prev_history_value
                 };
 
@@ -134,70 +132,99 @@ impl<'a> InscriptionUpdater<'a> {
             txs: vec![],
         };
 
-        let txs = match self.inscription_db.get(&partial.get_db_key()) {
-            Some(partial_txids) => {
-                let txids = PartialTxs::from_db(DBRow {
-                    key: partial.get_db_key(),
-                    value: partial_txids,
-                })?;
-
-                let mut txs = vec![];
-                for txid in txids.txs {
+        let txs = {
+            let txsids = {
+                if let Some(v) = partials_cache
+                    .as_mut()
+                    .map(|x| x.get(&previous_txid))
+                    .flatten()
+                {
+                    v.clone()
+                } else {
                     if !is_temp {
-                        txs.push(cache.get(&txid).unwrap().clone());
+                        vec![]
                     } else {
-                        let tx_result =
-                            self.tx_db.get(&db_key!("T", &txid.into_inner())).anyhow()?;
-                        let decoded = bitcoin::Transaction::consensus_decode(
-                            std::io::Cursor::new(tx_result),
-                        )?;
-                        txs.push(decoded);
+                        match self.inscription_db.get(&partial.get_db_key()) {
+                            None => vec![txid],
+                            Some(partials) => {
+                                PartialTxs::from_db(DBRow {
+                                    key: partial.get_db_key(),
+                                    value: partials,
+                                })
+                                .unwrap()
+                                .txs
+                            }
+                        }
                     }
                 }
-                txs.push(tx.clone());
-                txs
+            };
+
+            let mut txs = vec![];
+            for txid in txsids {
+                if let Some(v) = cache.as_ref().map(|x| x.get(&txid)).flatten() {
+                    txs.push(v.clone());
+                } else if is_temp {
+                    let tx_result = self.tx_db.get(&db_key!("T", &txid.into_inner())).anyhow()?;
+                    let decoded =
+                        bitcoin::Transaction::consensus_decode(std::io::Cursor::new(tx_result))?;
+                    txs.push(decoded);
+                }
             }
-            None => {
-                vec![tx.clone()]
-            }
+            txs.push(tx.clone());
+            txs
         };
 
         match Inscription::from_transactions(txs.clone()) {
             ParsedInscription::None => {
-                cache.remove(&txid);
-                // TODO idk
+                if let Some(v) = cache.as_mut() {
+                    v.remove(&txid).unwrap();
+                }
             }
 
             ParsedInscription::Partial => {
-                self.inscription_db.remove(&partial.get_db_key());
+                if let Some(_) = partials_cache
+                    .as_mut()
+                    .map(|x| x.remove(&previous_txid))
+                    .flatten()
+                {
+                    partials_cache
+                        .unwrap()
+                        .insert(txid, txs.iter().map(|x| x.txid()).collect_vec());
+                } else if is_temp {
+                    self.inscription_db.remove(&partial.get_db_key());
 
-                let row = PartialTxs {
-                    block_height,
-                    last_txid: txid,
-                    txs: txs.into_iter().map(|x| x.txid()).collect_vec(),
-                };
-
-                if is_temp {
-                    self.temp_db.remove(&PartialTxs::get_temp_db_key(
+                    let row = PartialTxs {
                         block_height,
-                        &partial.last_txid,
-                    ));
-                    self.temp_db
-                        .write(vec![row.to_temp_db_row()?], super::db::DBFlush::Disable);
-                }
+                        last_txid: txid,
+                        txs: txs.into_iter().map(|x| x.txid()).collect_vec(),
+                    };
 
-                self.inscription_db
-                    .write(vec![row.to_db()?], super::db::DBFlush::Disable);
+                    self.inscription_db
+                        .write(vec![row.to_db()?], super::db::DBFlush::Disable);
+
+                    if is_temp {
+                        self.temp_db.remove(&PartialTxs::get_temp_db_key(
+                            block_height,
+                            &partial.last_txid,
+                        ));
+                        self.temp_db
+                            .write(vec![row.to_temp_db_row()?], super::db::DBFlush::Disable);
+                    }
+                }
             }
 
             ParsedInscription::Complete(_inscription) => {
-                self.inscription_db.remove(&partial.get_db_key());
+                if let Some(partials_cache) = partials_cache.as_mut() {
+                    partials_cache.remove(&previous_txid);
+                } else if is_temp {
+                    self.inscription_db.remove(&partial.get_db_key());
+                }
 
                 let og_inscription_id = InscriptionId {
                     txid: Txid::from_slice(
                         &txs.first().anyhow_as("Partial txs vec is empty")?.txid(),
                     )
-                    .track_err()?,
+                    .anyhow()?,
                     // TODO find correct index instead hardcode
                     index: 0,
                 };
@@ -267,10 +294,10 @@ impl<'a> InscriptionUpdater<'a> {
                         vec![new_inc_n.to_temp_db_row()?],
                         super::db::DBFlush::Disable,
                     );
-                }
-
-                for i in txs.into_iter().rev() {
-                    cache.remove(&i.txid());
+                } else {
+                    for i in txs.into_iter().rev() {
+                        cache.as_mut().unwrap().remove(&i.txid());
+                    }
                 }
             }
         }
