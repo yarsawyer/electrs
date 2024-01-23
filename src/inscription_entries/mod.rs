@@ -14,16 +14,15 @@ use std::{
     str::FromStr,
 };
 
-pub(crate) use self::{
-    deserialize_from_str::DeserializeFromStr,
+pub use self::{
     entry::Entry,
-    epoch::Epoch,
-    height::Height,
     inscription::{Inscription, ParsedInscription},
     inscription_id::InscriptionId,
     sat::Sat,
     sat_point::SatPoint,
 };
+
+pub(crate) use self::{deserialize_from_str::DeserializeFromStr, epoch::Epoch, height::Height};
 
 pub mod decimal;
 pub mod deserialize_from_str;
