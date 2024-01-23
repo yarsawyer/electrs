@@ -277,16 +277,16 @@ impl Indexer {
                 .map(|x| *x.hash())
                 .collect_vec(),
             InscriptionParseBlock::ToHeight(height) => {
-                let last_indexed_block: Option<BlockHash> =
-                    self.store.inscription_db().get(b"ot").map(|x| {
-                        bitcoin::consensus::encode::deserialize(&x)
-                            .expect("invalid chain tip in `ot`")
-                    });
+                // let last_indexed_block: Option<BlockHash> =
+                //     self.store.inscription_db().get(b"ot").map(|x| {
+                //         bitcoin::consensus::encode::deserialize(&x)
+                //             .expect("invalid chain tip in `ot`")
+                //     });
+                // let last_number = last_indexed_block
+                //     .map(|x| self.get_block_height(x))
+                //     .flatten()
+                //     .unwrap_or(22490);
 
-                // let last_number = match last_indexed_block {
-                //     Some(v) => self.get_block_height(v).unwrap_or(22490),
-                //     None => 22490,
-                // };
                 // ! FOR TESTS
                 let last_number = 24700;
 

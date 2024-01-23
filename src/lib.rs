@@ -35,3 +35,4 @@ pub mod signal;
 pub mod util;
 
 pub use self::config::HEIGHT_DELAY;
+pub use self::inscription_entries::Inscription;
