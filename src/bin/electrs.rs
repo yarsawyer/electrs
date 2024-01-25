@@ -68,11 +68,6 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &metrics,
     );
 
-    // let last_indexed_block = store
-    //     .inscription_db()
-    //     .get(b"ot")
-    //     .map(|x| bitcoin::consensus::encode::deserialize(&x).expect("invalid chain tip in `ot`"));
-
     let (mut tip, _) = indexer.update(&daemon)?;
     let tip_height = store.get_block_height(tip).unwrap() as u32;
 

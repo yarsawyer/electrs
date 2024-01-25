@@ -1,17 +1,15 @@
+use anyhow::anyhow;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
+use bitcoin::hashes::Hash;
 use bitcoin::util::merkleblock::MerkleBlock;
 use bitcoin::VarInt;
 use itertools::Itertools;
+use parking_lot::RwLock;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use bitcoin::consensus::encode::{deserialize, serialize};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
-
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::convert::TryInto;
-use std::path::Path;
-use std::sync::Arc;
 
 use crate::chain::{
     BlockHash, BlockHeader, Network, OutPoint, Script, Transaction, TxOut, Txid, Value,
@@ -25,12 +23,19 @@ use crate::inscription_entries::inscription::{OrdHistoryRow, PartialTxs, UserOrd
 use crate::inscription_entries::InscriptionId;
 use crate::inscription_entries::{inscription::InscriptionMeta, Entry};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
+use crate::new_index::inscriptions_updater::IndexHandler;
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
     BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
 };
-use crate::{db_key, errors::*};
+use crate::{db_key, errors::*, HEIGHT_DELAY};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::convert::TryInto;
+use std::path::Path;
+use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::new_index::db::{DBFlush, DBRow, ReverseScanIterator, ScanIterator, DB};
 use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
@@ -59,6 +64,56 @@ pub struct Store {
     pub indexed_headers: parking_lot::RwLock<HeaderList>,
     outpoint_cache: parking_lot::RwLock<HashMap<OutPoint, u64>>,
 }
+
+// pub struct ChunkedTransactionIterator<I> {
+//     inner: I,
+//     chunk_size: usize,
+// }
+
+// impl<'a, I> ChunkedTransactionIterator<I>
+// where
+//     I: Iterator<Item = (u32, Vec<Transaction>)>,
+// {
+//     pub fn new(inner: I, chunk_size: usize) -> Self {
+//         Self { inner, chunk_size }
+//     }
+// }
+
+// impl<I> Iterator for ChunkedTransactionIterator<I>
+// where
+//     I: Iterator<Item = (u32, Vec<Transaction>)>,
+// {
+//     type Item = Vec<(u32, Vec<Transaction>)>;
+
+//     fn next(&mut self) -> Option<Self::Item> {
+//         let chunk: Vec<(u32, Transaction)> = self.inner.by_ref().take(self.chunk_size).collect();
+
+//         if chunk.is_empty() {
+//             return None;
+//         }
+
+//         let mut outpoint = HashMap::<Txid, Vec<Transaction>>::with_capacity(self.chunk_size / 100);
+//         let mut txs = Vec::with_capacity(self.chunk_size / 100);
+
+//         for (_, tx) in &chunk {
+//             match tx.input[0].previous_output.vout {
+//                 0 => {
+//                     let txid = tx.input[0].previous_output.txid;
+//                     outpoint.entry(txid).or_default().push(tx.clone());
+//                 }
+//                 _ => {}
+//             }
+//         }
+
+//         for (block_height, tx) in chunk {
+//             if let Some(v) = outpoint.remove(&tx.txid()) {
+//                 txs.push((block_height, v));
+//             }
+//         }
+
+//         Some(txs)
+//     }
+// }
 
 impl Store {
     pub fn open(path: &Path, config: &Config) -> Self {
@@ -277,18 +332,18 @@ impl Indexer {
                 .map(|x| *x.hash())
                 .collect_vec(),
             InscriptionParseBlock::ToHeight(height) => {
-                // let last_indexed_block: Option<BlockHash> =
-                //     self.store.inscription_db().get(b"ot").map(|x| {
-                //         bitcoin::consensus::encode::deserialize(&x)
-                //             .expect("invalid chain tip in `ot`")
-                //     });
-                // let last_number = last_indexed_block
-                //     .map(|x| self.get_block_height(x))
-                //     .flatten()
-                //     .unwrap_or(22490);
+                let last_indexed_block: Option<BlockHash> = self
+                    .store
+                    .inscription_db()
+                    .get(b"ot")
+                    .map(|x| BlockHash::from_slice(&x).unwrap());
+                let last_number = last_indexed_block
+                    .map(|x| self.get_block_height(x))
+                    .flatten()
+                    .unwrap_or(22490);
 
                 // ! FOR TESTS
-                let last_number = 24700;
+                // let last_number = 24700;
 
                 self.store
                     .indexed_headers
@@ -349,19 +404,13 @@ impl Indexer {
         chain: Arc<ChainQuery>,
         block: InscriptionParseBlock,
     ) -> anyhow::Result<()> {
-        let mut inscription_updater = InscriptionUpdater::new(
-            self.store.inscription_db(),
-            self.store.txstore_db(),
-            self.store.temp_db(),
-        )
-        .anyhow()?;
-
         let blocks = self.get_blocks_by_height(block).anyhow()?;
 
         let mut progress_span = None;
         let mut progress_span_ = None;
 
-        let last_block_number = self.store.indexed_headers.read().len() as u64 - 4;
+        let last_block_number =
+            self.store.indexed_headers.read().len() as u64 - HEIGHT_DELAY as u64;
 
         if blocks.len() > 3 {
             let span = tracing::info_span!("index_blocks");
@@ -378,61 +427,94 @@ impl Indexer {
             progress_span_ = Some(progress_span.as_ref().unwrap().enter());
         }
 
-        let mut i = last_block_number - blocks.len() as u64;
+        let partial_cache = Arc::new(RwLock::new(HashMap::with_capacity(1_000)));
 
-        let mut cache = HashMap::with_capacity(1_000);
-        let mut partial_cache = HashMap::with_capacity(1_000);
+        let mut i = 22490u32;
+        const CHUNK_SIZE: usize = 2000;
+        let last_block_hash = blocks.last().unwrap().clone();
 
-        let mut long_inscriptions = 0;
+        let mut last_indexed_block = None;
 
-        for b_hash in &blocks {
-            let Some(txs) = chain.get_block_txs(b_hash) else {
-                continue;
+        // DONT TOUCH THIS BELLSHIT
+        {
+            let indexer = IndexHandler {
+                inscription_db: &self.store.inscription_db,
+                partial_cache: partial_cache.clone(),
+                tx_db: &self.store.txstore_db,
             };
-            cache.extend(txs.iter().map(|x| (x.txid(), x.clone())));
-            let block_number = self.get_block_height(*b_hash).unwrap();
 
-            for mut txs in Self::chunk_transactions(txs) {
-                if txs.len() == 1 {
-                    inscription_updater
-                        .index_transaction_inscriptions(
-                            txs.pop().unwrap(),
-                            block_number as u32,
-                            false,
-                            Some(&mut cache),
-                            Some(&mut partial_cache),
-                        )
-                        .unwrap();
-                } else {
-                    long_inscriptions += 1;
-                    // ! SHIT
-                }
-            }
+            blocks
+                .into_iter()
+                .rev()
+                .chunks(CHUNK_SIZE)
+                .into_iter()
+                .for_each(|blocks_chunk| {
+                    let mut chunked = Vec::new();
 
-            i += 1;
-            if progress_span.is_some() {
-                tracing::Span::current().pb_inc(1);
-                progress_span
-                    .as_ref()
-                    .unwrap()
-                    .pb_set_message(&format!("{i}/{} indexing blocks", last_block_number));
-            }
+                    let blocks_loaded = AtomicU32::new(0);
 
-            self.store.inscription_db().put(b"ot", &serialize(&b_hash));
+                    blocks_chunk
+                        .collect_vec()
+                        .into_par_iter()
+                        .map(|hash| {
+                            // let start = Instant::now();
+                            let block_height = self.get_block_height(hash).unwrap() as u32;
+                            let shit = chain.as_ref().get_multi_txs(&hash);
+                            let shit = shit
+                                .unwrap()
+                                .into_iter()
+                                // .map(move |x| (block_height, x))
+                                .collect_vec();
+
+                            {
+                                blocks_loaded.fetch_add(1, std::sync::atomic::Ordering::Release);
+                                progress_span.as_ref().unwrap().pb_set_message(&format!(
+                                    "Loading blocks... {} / {}",
+                                    blocks_loaded.load(std::sync::atomic::Ordering::Acquire),
+                                    CHUNK_SIZE
+                                ));
+                            }
+
+                            (block_height, shit)
+                        })
+                        .collect_into_vec(&mut chunked);
+
+                    progress_span
+                        .as_ref()
+                        .unwrap()
+                        .pb_set_message(&format!("{} / {} indexing blocks", i, last_block_number));
+
+                    last_indexed_block = Some(chunked.last().cloned().unwrap().0);
+
+                    chunked.sort_unstable_by_key(|x| -(x.0 as i64));
+
+                    Self::chain_txs(chunked)
+                        .into_par_iter()
+                        .for_each(|mut chain| {
+                            if chain.len() == 1 {
+                                let (height, tx) = chain.pop().unwrap();
+                                indexer.handle_one(tx, height).unwrap();
+                            } else {
+                                indexer.handle_chain(chain).unwrap();
+                            }
+                        });
+
+                    i += CHUNK_SIZE as u32;
+                    progress_span.as_ref().unwrap().pb_inc(CHUNK_SIZE as u64);
+                });
         }
 
-        dbg!(cache.len());
-        dbg!(partial_cache.len());
-        dbg!(long_inscriptions);
+        dbg!(partial_cache.read().len());
 
-        if partial_cache.len() > 0 {
+        if partial_cache.read().len() > 0 {
             let to_write = partial_cache
-                .into_iter()
+                .read()
+                .iter()
                 .map(|(last_txid, txs)| {
                     PartialTxs {
                         block_height: 0,
-                        last_txid,
-                        txs,
+                        last_txid: last_txid.clone(),
+                        txs: txs.iter().map(|x| x.1.txid()).collect_vec(),
                     }
                     .to_db()
                     .expect("Failed to serialize partials")
@@ -441,39 +523,50 @@ impl Indexer {
             self.store.inscription_db.write(to_write, DBFlush::Disable);
         }
 
-        drop(cache);
-
-        self.start_auto_compactions(&self.store.inscription_db);
+        self.store
+            .inscription_db
+            .put(b"ot", &last_block_hash.into_inner());
 
         drop(progress_span_);
         drop(progress_span);
 
+        self.start_auto_compactions(&self.store.inscription_db);
+
         Ok(())
     }
 
-    fn chunk_transactions(transactions: Vec<Transaction>) -> Vec<Vec<Transaction>> {
-        let mut chunks: Vec<Vec<Transaction>> = Vec::new();
-        let mut outpoints: HashMap<Txid, Vec<Transaction>> = HashMap::new();
+    /// Function collect blocks to chain transactions by prevouts
+    fn chain_txs(blocks: Vec<(u32, Vec<Transaction>)>) -> Vec<Vec<(u32, Transaction)>> {
+        let mut outpoint = HashMap::<Txid, Vec<(u32, Transaction)>>::new();
+        let mut txs = Vec::new();
 
-        for tx in transactions.iter().rev() {
-            if let Some(v) = outpoints.remove(&tx.input[0].previous_output.txid) {
-                let mut res = v.clone();
-                res.push(tx.clone());
-                outpoints.insert(tx.txid(), res);
-            } else {
-                outpoints.insert(tx.txid(), vec![tx.clone()]);
+        for (block_h, block_txs) in &blocks {
+            for tx in block_txs {
+                if tx.input[0].previous_output.vout != 0 {
+                    continue;
+                }
+                let prev_txid = tx.input[0].previous_output.txid;
+                if let Some(mut partial) = outpoint.remove(&tx.txid()) {
+                    partial.push((*block_h, tx.clone()));
+                    outpoint.insert(tx.txid(), partial);
+                } else {
+                    outpoint
+                        .entry(prev_txid)
+                        .or_default()
+                        .push((*block_h, tx.clone()));
+                }
             }
         }
 
-        for i in transactions.into_iter() {
-            if let Some(v) = outpoints.get(&i.txid()) {
-                chunks.push(v.clone());
-            } else {
-                continue;
+        for (_, block_txs) in blocks {
+            for tx in block_txs {
+                if let Some(shit) = outpoint.remove(&tx.txid()) {
+                    txs.push(shit);
+                }
             }
         }
 
-        chunks
+        txs
     }
 
     fn headers_to_add(&self, new_headers: &[HeaderEntry]) -> Vec<HeaderEntry> {
@@ -648,6 +741,33 @@ impl ChainQuery {
             };
             Ok(Some(bincode_util::deserialize_little(&v).track_err()?))
         }
+    }
+
+    pub fn get_multi_txs(&self, hash: &BlockHash) -> anyhow::Result<Vec<Transaction>> {
+        let txids = self
+            .store
+            .txstore_db
+            .get(&BlockRow::txids_key(full_hash(&hash[..])))
+            .map(|val| {
+                bincode_util::deserialize_little::<Vec<Txid>>(&val)
+                    .expect("failed to parse block txids")
+            })
+            .anyhow()?
+            .into_iter()
+            .map(|x| TxRow::key(&x[..]));
+
+        let transactions = self
+            .store
+            .txstore_db
+            .db
+            .multi_get(txids)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|x| deserialize::<Transaction>(&x).expect("failed to parse Transaction"))
+            .collect_vec();
+
+        Ok(transactions)
     }
 
     pub fn get_block_txs(&self, hash: &BlockHash) -> Option<Vec<Transaction>> {

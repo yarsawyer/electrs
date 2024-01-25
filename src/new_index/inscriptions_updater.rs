@@ -17,6 +17,7 @@ use anyhow::{Ok, Result};
 use bitcoin::{consensus::Decodable, Address, OutPoint};
 use bitcoin::{hashes::Hash, Transaction, Txid};
 use itertools::Itertools;
+use parking_lot::RwLock;
 
 use super::{schema::BlockRow, DBRow, DB};
 pub struct InscriptionUpdater<'a> {
@@ -35,12 +36,12 @@ impl<'a> InscriptionUpdater<'a> {
     }
 
     pub fn index_transaction_inscriptions(
-        &mut self,
+        &self,
         tx: Transaction,
         block_height: u32,
         is_temp: bool,
-        mut cache: Option<&mut HashMap<Txid, Transaction>>,
-        mut partials_cache: Option<&mut HashMap<Txid, Vec<Txid>>>,
+        cache: Option<Arc<RwLock<HashMap<Txid, Transaction>>>>,
+        partials_cache: Option<Arc<RwLock<HashMap<Txid, Vec<Txid>>>>>,
     ) -> Result<u64> {
         let txid = tx.txid();
         let previous_txid = tx.input[0].previous_output.txid;
@@ -135,8 +136,8 @@ impl<'a> InscriptionUpdater<'a> {
         let txs = {
             let txsids = {
                 if let Some(v) = partials_cache
-                    .as_mut()
-                    .map(|x| x.get(&previous_txid))
+                    .as_ref()
+                    .map(|x| x.read().get(&previous_txid).map(|x| x.clone()))
                     .flatten()
                 {
                     v.clone()
@@ -161,7 +162,11 @@ impl<'a> InscriptionUpdater<'a> {
 
             let mut txs = vec![];
             for txid in txsids {
-                if let Some(v) = cache.as_ref().map(|x| x.get(&txid)).flatten() {
+                if let Some(v) = cache
+                    .as_ref()
+                    .map(|x| x.read().get(&txid).map(|x| x.clone()))
+                    .flatten()
+                {
                     txs.push(v.clone());
                 } else if is_temp {
                     let tx_result = self.tx_db.get(&db_key!("T", &txid.into_inner())).anyhow()?;
@@ -174,21 +179,22 @@ impl<'a> InscriptionUpdater<'a> {
             txs
         };
 
-        match Inscription::from_transactions(&txs) {
+        match Inscription::from_transactions(txs.iter().collect_vec().as_slice()) {
             ParsedInscription::None => {
-                if let Some(v) = cache.as_mut() {
-                    v.remove(&txid).unwrap();
+                if let Some(v) = &cache {
+                    v.write().remove(&txid);
                 }
             }
 
             ParsedInscription::Partial => {
                 if let Some(_) = partials_cache
-                    .as_mut()
-                    .map(|x| x.remove(&previous_txid))
+                    .as_ref()
+                    .map(|x| x.write().remove(&previous_txid))
                     .flatten()
                 {
                     partials_cache
                         .unwrap()
+                        .write()
                         .insert(txid, txs.iter().map(|x| x.txid()).collect_vec());
                 } else if is_temp {
                     self.inscription_db.remove(&partial.get_db_key());
@@ -214,8 +220,8 @@ impl<'a> InscriptionUpdater<'a> {
             }
 
             ParsedInscription::Complete(_inscription) => {
-                if let Some(partials_cache) = partials_cache.as_mut() {
-                    partials_cache.remove(&previous_txid);
+                if let Some(partials_cache) = &partials_cache {
+                    partials_cache.write().remove(&previous_txid);
                 } else if is_temp {
                     self.inscription_db.remove(&partial.get_db_key());
                 }
@@ -296,7 +302,7 @@ impl<'a> InscriptionUpdater<'a> {
                     );
                 } else {
                     for i in txs.into_iter().rev() {
-                        cache.as_mut().unwrap().remove(&i.txid());
+                        cache.as_ref().unwrap().write().remove(&i.txid());
                     }
                 }
             }
@@ -334,7 +340,10 @@ impl<'a> InscriptionUpdater<'a> {
                     value: x,
                 })
             })
-            .unwrap()
+            .unwrap_or(Ok(LastInscriptionNumber {
+                height: 0,
+                number: 0,
+            }))
             .anyhow_as("Failed to decode last inscription number")?;
 
         last_number.height = next_block_height;
@@ -491,18 +500,15 @@ impl<'a> InscriptionUpdater<'a> {
     }
 }
 
-
-
-type GenesisHeight = u32;
 pub struct IndexHandler<'a> {
     pub inscription_db: &'a DB,
     pub tx_db: &'a DB,
-    pub cache: Arc<parking_lot::RwLock<HashMap<Txid,Transaction>>>,
-    pub partial_cache: Arc<parking_lot::RwLock<HashMap<Txid,(Vec<Transaction>, GenesisHeight)>>>,
+    pub partial_cache: Arc<parking_lot::RwLock<HashMap<Txid, Vec<(u32, Transaction)>>>>,
 }
 impl<'a> IndexHandler<'a> {
     fn get_owner(tx: &Transaction) -> anyhow::Result<String> {
-        return tx.output
+        return tx
+            .output
             .first()
             .and_then(|x| {
                 Address::from_script(
@@ -511,22 +517,25 @@ impl<'a> IndexHandler<'a> {
                 )
             })
             .map(|x| x.to_string())
-            .anyhow_as("No owner 😭")               
-        
+            .anyhow_as("No owner 😭");
     }
     fn try_move_inscription(&self, tx: &Transaction, height: u32) -> anyhow::Result<bool> {
         let prev_tx = tx.input[0].previous_output;
         let tx_sat = tx.output[0].value;
         let txid = tx.txid();
 
-        if prev_tx.vout != 0 { return Ok(false); }
+        if prev_tx.vout != 0 {
+            return Ok(false);
+        }
         let Some(mut inscription_extra) = self
             .inscription_db
             .remove(&db_key!(TXID_IS_INSCRIPTION, &prev_tx.txid.into_inner()))
             .map(|x| InscriptionExtraData::from_raw(&x.to_vec()))
             .transpose()?
-        else { return Ok(false); };
-            
+        else {
+            return Ok(false);
+        };
+
         let old_owner = inscription_extra.owner.clone();
 
         // Work with old user
@@ -559,7 +568,8 @@ impl<'a> IndexHandler<'a> {
             OrdHistoryRow::new(new_owner, txid, prev_history_value)
         };
 
-        let new_inscription_meta = self.inscription_db
+        let new_inscription_meta = self
+            .inscription_db
             .remove(&InscriptionMeta::get_db_key(inscription_extra.genesis)?)
             .map(|x| InscriptionMeta::from_raw(&x))
             .anyhow()?
@@ -567,7 +577,7 @@ impl<'a> IndexHandler<'a> {
 
         self.inscription_db.write(
             vec![
-                ord_history.into_row(), 
+                ord_history.into_row(),
                 inscription_extra.to_db_row(&txid)?,
                 new_inscription_meta.to_db_row()?,
             ],
@@ -576,77 +586,46 @@ impl<'a> IndexHandler<'a> {
 
         Ok(true)
     }
-    fn try_load_partial(&self, tx: &Transaction) -> anyhow::Result<Option<(Vec<Transaction>, GenesisHeight)>> {
+    fn try_load_partial(
+        &self,
+        tx: &Transaction,
+    ) -> anyhow::Result<Option<Vec<(u32, Transaction)>>> {
         let prev_txid = tx.input[0].previous_output.txid;
-
-        let cached = self.partial_cache.write().remove(&prev_txid);
-        if cached.is_some() { return Ok(cached); }
-        
-        let partial = PartialTxs {
-            block_height: 0,
-            last_txid: prev_txid,
-            txs: vec![],
-        };
-
-
-        let (txids, height) = match self.inscription_db.get(&partial.get_db_key()) {
-            None => return Ok(None),
-            Some(partials) => {
-                let data = PartialTxs::from_db(DBRow {
-                    key: partial.get_db_key(),
-                    value: partials,
-                })
-                .unwrap();
-                (data.txs, data.block_height)
-            }
-        };
-
-        let mut partial = vec![];
-        for txid in txids {
-            if let Some(v) = self.cache.read().get(&txid) {
-                partial.push(v.clone());
-            } else {
-                let tx_result = self.tx_db.get(&db_key!("T", &txid.into_inner())).anyhow()?;
-                let decoded =
-                    bitcoin::Transaction::consensus_decode(std::io::Cursor::new(tx_result))?;
-                partial.push(decoded);
-            }
-        }
-            
-        Ok(Some((partial, height)))
+        Ok(self.partial_cache.write().remove(&prev_txid))
     }
     pub fn handle_one(&self, tx: Transaction, height: u32) -> anyhow::Result<()> {
-        if self.try_move_inscription(&tx, height)? { return Ok(()); }
-        
-        let (mut partial, genesisi_height) = if let Some(mut data) = self.try_load_partial(&tx)? {
-            data.0.push(tx);
-            data
+        if self.try_move_inscription(&tx, height)? {
+            return Ok(());
         }
-        else { (vec![tx], height) };
-        
-        match Inscription::from_transactions(&partial) {
+
+        let mut partial = if let Some(mut data) = self.try_load_partial(&tx)? {
+            data.push((height, tx));
+            data
+        } else {
+            vec![(height, tx)]
+        };
+
+        match Inscription::from_transactions(&partial.iter().map(|x| &x.1).collect_vec()) {
             // drop tx
-            ParsedInscription::None => { 
-                let tx = partial.remove(0).txid();
-                self.cache.write().remove(&tx); 
-            },
+            ParsedInscription::None => {
+                partial.remove(0);
+            }
             ParsedInscription::Partial => {
-                self.partial_cache.write().insert(
-                    partial.last().expect("Not happend 💀").txid(), 
-                    (partial, genesisi_height)
-                );
-            },
+                self.partial_cache
+                    .write()
+                    .insert(partial.last().expect("Not happend 💀").1.txid(), partial);
+            }
             ParsedInscription::Complete(inscription) => {
-                let tx = partial.last().expect("Not happend 💀");
+                let tx = &partial.last().expect("Not happend 💀").1;
                 let value = tx.output[0].value;
                 let outpoint = tx.txid();
 
                 let inscription_number = 0;
                 let content_type = inscription.content_type().anyhow()?.to_owned();
                 let content_len = inscription.content_length().anyhow()?;
-                let genesis = partial.first().expect("Not happend 💀").txid();
-                let owner = Self::get_owner(partial.last().expect("Not happend 💀"))?;
-
+                let (height, genesis) = partial.first().expect("Not happend 💀");
+                let genesis = genesis.txid();
+                let owner = Self::get_owner(tx)?;
 
                 let inscription_id = InscriptionId {
                     txid: genesis,
@@ -672,9 +651,7 @@ impl<'a> IndexHandler<'a> {
                     },
                 );
 
-
-                let inscription_extra =
-                    InscriptionExtraData::new(genesis, owner, genesisi_height);
+                let inscription_extra = InscriptionExtraData::new(genesis, owner, *height);
 
                 self.inscription_db.write(
                     vec![
@@ -684,45 +661,40 @@ impl<'a> IndexHandler<'a> {
                     ],
                     super::db::DBFlush::Disable,
                 );
-
             }
         }
 
         Ok(())
     }
-    pub fn handle_chain(&self, mut partial: Vec<Transaction>, mut height: u32) -> anyhow::Result<()> {
+    pub fn handle_chain(&self, mut partials: Vec<(u32, Transaction)>) -> anyhow::Result<()> {
         // get partial from cache or drop all fund tx
-        if let Some((mut last_partial, genesis_height)) = self.try_load_partial(&partial[0])? {
-            last_partial.extend(partial);
-            partial = last_partial;
-            height = genesis_height;
+        if let Some(last_partials) = self.try_load_partial(&partials[0].1)? {
+            partials.extend(last_partials);
         }
-        
-        while !partial.is_empty() {
-            match Inscription::from_transactions(&partial) {
+
+        while !partials.is_empty() {
+            match Inscription::from_transactions(&partials.iter().map(|x| &x.1).collect_vec()) {
                 // drop fund tx
-                ParsedInscription::None => { 
-                    let fund_tx = partial.remove(0).txid();
-                    self.cache.write().remove(&fund_tx); 
-                },
+                ParsedInscription::None => {
+                    partials.remove(0);
+                }
                 ParsedInscription::Partial => {
-                    self.partial_cache.write().insert(
-                        partial.last().expect("Not happend 💀").txid(), 
-                        (partial, height)
-                    );
+                    self.partial_cache
+                        .write()
+                        .insert(partials.last().expect("Not happend 💀").1.txid(), partials);
                     break;
                 }
                 ParsedInscription::Complete(inscription) => {
-                    let tx = partial.last().expect("Not happend 💀");
+                    let tx = &partials.last().expect("Not happend 💀").1;
                     let value = tx.output[0].value;
                     let outpoint = tx.txid();
 
                     let inscription_number = 0;
                     let content_type = inscription.content_type().anyhow()?.to_owned();
                     let content_len = inscription.content_length().anyhow()?;
-                    let genesis = partial.first().expect("Not happend 💀").txid();
-                    let owner = Self::get_owner(partial.last().expect("Not happend 💀"))?;
-
+                    let (height, genesis) = partials.first().expect("Not happend 💀");
+                    let genesis = genesis.txid();
+                    let owner = Self::get_owner(&partials.last().expect("Not happend 💀").1)?;
 
                     let inscription_id = InscriptionId {
                         txid: genesis,
@@ -748,9 +720,7 @@ impl<'a> IndexHandler<'a> {
                         },
                     );
 
-
-                    let inscription_extra =
-                        InscriptionExtraData::new(genesis, owner, height);
+                    let inscription_extra = InscriptionExtraData::new(genesis, owner, *height);
 
                     self.inscription_db.write(
                         vec![
@@ -760,10 +730,12 @@ impl<'a> IndexHandler<'a> {
                         ],
                         super::db::DBFlush::Disable,
                     );
+
+                    break;
                 }
             }
         }
-        
+
         Ok(())
     }
 }
