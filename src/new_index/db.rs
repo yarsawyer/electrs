@@ -71,7 +71,7 @@ impl<'a> Iterator for ReverseScanIterator<'a> {
 
 #[derive(Debug)]
 pub struct DB {
-    db: rocksdb::DB,
+    pub db: rocksdb::DB,
 }
 
 #[derive(Copy, Clone, Debug)]

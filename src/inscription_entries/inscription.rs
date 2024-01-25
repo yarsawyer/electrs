@@ -431,7 +431,7 @@ impl Inscription {
         Self { content_type, body }
     }
 
-    pub fn from_transactions(txs: &[Transaction]) -> ParsedInscription {
+    pub fn from_transactions(txs: &[&Transaction]) -> ParsedInscription {
         let mut sig_scripts = Vec::with_capacity(txs.len());
         for i in 0..txs.len() {
             if txs[i].input.is_empty() {
