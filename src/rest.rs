@@ -1,6 +1,5 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
-use crate::inscription_entries::index::TXID_IS_INSCRIPTION;
 use crate::inscription_entries::inscription::InscriptionMeta;
 use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::schema::OrdsSearcher;
@@ -1163,17 +1162,17 @@ fn handle_request(
         (&Method::GET, Some(&"mempool"), None, None, None, None) => {
             json_response(query.mempool().backlog_stats(), TTL_SHORT)
         }
-        (&Method::GET, Some(&"test"), Some(shit), None, None, None) => {
-            let tx = query.chain().store().inscription_db().get(&db_key!(
-                TXID_IS_INSCRIPTION,
-                &Txid::from_str(shit).unwrap().into_inner()
-            ));
-            if let Some(_) = tx {
-                return json_response(json!({ "founded": true }), 0);
-            } else {
-                http_message(StatusCode::BAD_REQUEST, "shit", 0)
-            }
-        }
+        // (&Method::GET, Some(&"test"), Some(shit), None, None, None) => {
+        //     let tx = query.chain().store().inscription_db().get(&db_key!(
+        //         OUTPOINT_IS_INSCRIPTION,
+        //         &Txid::from_str(shit).unwrap().into_inner()
+        //     ));
+        //     if let Some(_) = tx {
+        //         return json_response(json!({ "founded": true }), 0);
+        //     } else {
+        //         http_message(StatusCode::BAD_REQUEST, "shit", 0)
+        //     }
+        // }
         (&Method::GET, Some(&"mempool"), Some(&"txids"), None, None, None) => {
             json_response(query.mempool().txids(), TTL_SHORT)
         }

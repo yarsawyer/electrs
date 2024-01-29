@@ -17,13 +17,13 @@ use crate::chain::{
 use crate::config::Config;
 use crate::daemon::Daemon;
 use crate::inscription_entries::index::{
-    ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, TXID_IS_INSCRIPTION,
+    ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, OUTPOINT_IS_INSCRIPTION,
 };
-use crate::inscription_entries::inscription::{OrdHistoryRow, PartialTxs, UserOrdStats};
+use crate::inscription_entries::inscription::{InscriptionExtraData, OrdHistoryRow, PartialTxs, UserOrdStats};
 use crate::inscription_entries::InscriptionId;
 use crate::inscription_entries::{inscription::InscriptionMeta, Entry};
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
-use crate::new_index::inscriptions_updater::IndexHandler;
+use crate::new_index::inscriptions_updater::{IndexHandler, MoveIndexer};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
@@ -65,55 +65,6 @@ pub struct Store {
     outpoint_cache: parking_lot::RwLock<HashMap<OutPoint, u64>>,
 }
 
-// pub struct ChunkedTransactionIterator<I> {
-//     inner: I,
-//     chunk_size: usize,
-// }
-
-// impl<'a, I> ChunkedTransactionIterator<I>
-// where
-//     I: Iterator<Item = (u32, Vec<Transaction>)>,
-// {
-//     pub fn new(inner: I, chunk_size: usize) -> Self {
-//         Self { inner, chunk_size }
-//     }
-// }
-
-// impl<I> Iterator for ChunkedTransactionIterator<I>
-// where
-//     I: Iterator<Item = (u32, Vec<Transaction>)>,
-// {
-//     type Item = Vec<(u32, Vec<Transaction>)>;
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         let chunk: Vec<(u32, Transaction)> = self.inner.by_ref().take(self.chunk_size).collect();
-
-//         if chunk.is_empty() {
-//             return None;
-//         }
-
-//         let mut outpoint = HashMap::<Txid, Vec<Transaction>>::with_capacity(self.chunk_size / 100);
-//         let mut txs = Vec::with_capacity(self.chunk_size / 100);
-
-//         for (_, tx) in &chunk {
-//             match tx.input[0].previous_output.vout {
-//                 0 => {
-//                     let txid = tx.input[0].previous_output.txid;
-//                     outpoint.entry(txid).or_default().push(tx.clone());
-//                 }
-//                 _ => {}
-//             }
-//         }
-
-//         for (block_height, tx) in chunk {
-//             if let Some(v) = outpoint.remove(&tx.txid()) {
-//                 txs.push((block_height, v));
-//             }
-//         }
-
-//         Some(txs)
-//     }
-// }
 
 impl Store {
     pub fn open(path: &Path, config: &Config) -> Self {
@@ -192,10 +143,10 @@ impl Store {
     }
 }
 
-type UtxoMap = HashMap<OutPoint, (BlockId, Value, Option<InscriptionId>, Option<String>)>;
+type UtxoMap = HashMap<OutPoint, (BlockId, Value, Option<OutPoint>, Option<String>)>;
 type UtxoVec = Vec<(
     OutPoint,
-    (BlockId, Value, Option<InscriptionId>, Option<String>),
+    (BlockId, Value, Option<OutPoint>, Option<String>),
 )>;
 
 #[derive(Debug)]
@@ -337,13 +288,16 @@ impl Indexer {
                     .inscription_db()
                     .get(b"ot")
                     .map(|x| BlockHash::from_slice(&x).unwrap());
+
                 let last_number = last_indexed_block
                     .map(|x| self.get_block_height(x))
                     .flatten()
                     .unwrap_or(22490);
 
                 // ! FOR TESTS
-                // let last_number = 24700;
+                let last_number = 22489;
+                //let height = 27176;
+                dbg!(last_number, height);
 
                 self.store
                     .indexed_headers
@@ -360,7 +314,7 @@ impl Indexer {
                 .unwrap()
                 .hash()],
         };
-
+        dbg!(blocks.len());
         Ok(blocks)
     }
 
@@ -369,7 +323,7 @@ impl Indexer {
         chain: Arc<ChainQuery>,
         block: InscriptionParseBlock,
     ) -> anyhow::Result<()> {
-        let mut inscription_updater = InscriptionUpdater::new(
+        let inscription_updater = InscriptionUpdater::new(
             self.store.inscription_db(),
             self.store.txstore_db(),
             self.store.temp_db(),
@@ -398,7 +352,7 @@ impl Indexer {
 
         Ok(())
     }
-
+    //@ gitler
     pub fn index_inscription(
         &self,
         chain: Arc<ChainQuery>,
@@ -406,115 +360,73 @@ impl Indexer {
     ) -> anyhow::Result<()> {
         let blocks = self.get_blocks_by_height(block).anyhow()?;
 
-        let mut progress_span = None;
-        let mut progress_span_ = None;
-
-        let last_block_number =
-            self.store.indexed_headers.read().len() as u64 - HEIGHT_DELAY as u64;
-
-        if blocks.len() > 3 {
-            let span = tracing::info_span!("index_blocks");
-            span.pb_set_style(
-                &indicatif::ProgressStyle::with_template("{prefix:.bold} <{bar}> {msg}")
-                    .unwrap()
-                    .progress_chars("█▉▊▋▌▍▎▏  "),
-            );
-            span.pb_set_length(last_block_number);
-            span.pb_set_message("indexing blocks with inscriptions");
-            span.pb_inc(last_block_number - blocks.len() as u64);
-
-            progress_span = Some(span);
-            progress_span_ = Some(progress_span.as_ref().unwrap().enter());
-        }
-
-        let partial_cache = Arc::new(RwLock::new(HashMap::with_capacity(1_000)));
-
-        let mut i = 22490u32;
-        const CHUNK_SIZE: usize = 2000;
+        const CHUNK_SIZE: usize = 1000;
         let last_block_hash = blocks.last().unwrap().clone();
+        
+        let mut indexer = IndexHandler {
+            inscription_db: &self.store.inscription_db,
+            cached_partial: HashMap::new(),
+            inscription_number: 0,
+        };
 
-        let mut last_indexed_block = None;
+        let move_indexer = MoveIndexer {
+            inscription_db: &self.store.inscription_db,
+            txstore_db: &self.store.txstore_db,
+        };
 
         // DONT TOUCH THIS BELLSHIT
         {
-            let indexer = IndexHandler {
-                inscription_db: &self.store.inscription_db,
-                partial_cache: partial_cache.clone(),
-                tx_db: &self.store.txstore_db,
-            };
-
-            blocks
-                .into_iter()
-                .rev()
-                .chunks(CHUNK_SIZE)
-                .into_iter()
-                .for_each(|blocks_chunk| {
-                    let mut chunked = Vec::new();
-
-                    let blocks_loaded = AtomicU32::new(0);
-
+            for blocks_chunk in blocks.into_iter().chunks(CHUNK_SIZE).into_iter() {
+                let mut chunked = Vec::new();
+                    let timer = Instant::now();
                     blocks_chunk
                         .collect_vec()
                         .into_par_iter()
                         .map(|hash| {
-                            // let start = Instant::now();
                             let block_height = self.get_block_height(hash).unwrap() as u32;
                             let shit = chain.as_ref().get_multi_txs(&hash);
                             let shit = shit
                                 .unwrap()
                                 .into_iter()
-                                // .map(move |x| (block_height, x))
                                 .collect_vec();
-
-                            {
-                                blocks_loaded.fetch_add(1, std::sync::atomic::Ordering::Release);
-                                progress_span.as_ref().unwrap().pb_set_message(&format!(
-                                    "Loading blocks... {} / {}",
-                                    blocks_loaded.load(std::sync::atomic::Ordering::Acquire),
-                                    CHUNK_SIZE
-                                ));
-                            }
 
                             (block_height, shit)
                         })
                         .collect_into_vec(&mut chunked);
 
-                    progress_span
-                        .as_ref()
-                        .unwrap()
-                        .pb_set_message(&format!("{} / {} indexing blocks", i, last_block_number));
+                    chunked.sort_unstable_by_key(|x| x.0);
+                    
+                    warn!("loading - {}", timer.elapsed().as_secs_f64());
 
-                    last_indexed_block = Some(chunked.last().cloned().unwrap().0);
+                    let timer = Instant::now();
+                    let completed = indexer.handle_blocks(&chunked);
+                    warn!("Parsing - {}", timer.elapsed().as_secs_f64());
+                
 
-                    chunked.sort_unstable_by_key(|x| -(x.0 as i64));
+                    let timer = Instant::now();
+                    indexer.write_inscription(completed).unwrap();
+                    warn!("Writing - {}", timer.elapsed().as_secs_f64());
 
-                    Self::chain_txs(chunked)
-                        .into_par_iter()
-                        .for_each(|mut chain| {
-                            if chain.len() == 1 {
-                                let (height, tx) = chain.pop().unwrap();
-                                indexer.handle_one(tx, height).unwrap();
-                            } else {
-                                indexer.handle_chain(chain).unwrap();
-                            }
-                        });
+                    let timer = Instant::now();
+                    let moved = move_indexer.handle(&chunked);
+                    warn!("Moving - {}", timer.elapsed().as_secs_f64());
 
-                    i += CHUNK_SIZE as u32;
-                    progress_span.as_ref().unwrap().pb_inc(CHUNK_SIZE as u64);
-                });
+                    let timer = Instant::now();
+                    move_indexer.write_moves(moved).unwrap();
+                    warn!("Writing moves - {}", timer.elapsed().as_secs_f64());
+                    warn!("");
+            }
+
         }
 
-        dbg!(partial_cache.read().len());
-
-        if partial_cache.read().len() > 0 {
-            let to_write = partial_cache
-                .read()
+        if !indexer.cached_partial.is_empty() {
+            let to_write = indexer.cached_partial
                 .iter()
                 .map(|(last_txid, txs)| {
                     PartialTxs {
-                        block_height: 0,
-                        last_txid: last_txid.clone(),
-                        txs: txs.iter().map(|x| x.1.txid()).collect_vec(),
+                        block_height: txs.first().unwrap().0,
+                        last_txid: *last_txid,
+                        txs: txs.iter().map(|x| x.2.txid()).collect_vec(),
                     }
                     .to_db()
                     .expect("Failed to serialize partials")
@@ -527,12 +439,84 @@ impl Indexer {
             .inscription_db
             .put(b"ot", &last_block_hash.into_inner());
 
-        drop(progress_span_);
-        drop(progress_span);
 
         self.start_auto_compactions(&self.store.inscription_db);
 
         Ok(())
+    }
+    fn find_completed(h: u32, txs: &Vec<Transaction>) ->  Vec<Vec<(u32, u32, Transaction)>> {
+        let mut data: HashMap<Txid, Vec<(u32, u32,Transaction)>> = HashMap::new();
+        for (i,tx) in txs.iter().enumerate() {
+            if tx.input[0].previous_output.vout != 0 {
+                continue;
+            }
+            let txid = tx.txid();
+            let prev_txid = tx.input[0].previous_output.txid;
+
+            if let Some(mut partial) = data.remove(&prev_txid) {
+                partial.push((h, i as u32, tx.clone()));
+                data.insert(txid, partial);
+            } else {
+                data.entry(tx.txid())
+                    .or_default()
+                    .push((h, i as u32, tx.clone()));
+            }
+        }
+        data.into_iter().map(|x| x.1).collect_vec()
+    }  
+    fn handle_txs_block(h: u32, txs: &Vec<Transaction>) ->  Vec<Vec<(u32, u32, Transaction)>> {
+        let mut data: HashMap<Txid, Vec<(u32, u32,Transaction)>> = HashMap::new();
+        for (i,tx) in txs.iter().enumerate() {
+            if tx.input[0].previous_output.vout != 0 {
+                continue;
+            }
+            let txid = tx.txid();
+            let prev_txid = tx.input[0].previous_output.txid;
+
+            if let Some(mut partial) = data.remove(&prev_txid) {
+                partial.push((h, i as u32, tx.clone()));
+                data.insert(txid, partial);
+            } else {
+                data.entry(tx.txid())
+                    .or_default()
+                    .push((h, i as u32, tx.clone()));
+            }
+        }
+        data.into_iter().map(|x| x.1).collect_vec()
+    }  
+    fn test_chain_txs(blocks: Vec<(u32, Vec<Transaction>)>) -> Vec<Vec<(u32, u32, Transaction)>> {
+        let mut outpoint = HashMap::<Txid, Vec<(u32, u32, Transaction)>>::new();
+
+        let (h, txs) = blocks.first().unwrap();
+        Self::handle_txs_block(*h, txs).into_iter().for_each(|chain|{
+            outpoint.insert(chain.last().unwrap().2.txid(), chain);
+        });
+    
+        for (h, txs) in blocks.iter().skip(1) {
+            for chain in Self::handle_txs_block(*h, txs) {
+                let txid = chain.last().unwrap().2.txid();
+                let prev_txid = chain.first().unwrap().2.input[0].previous_output.txid;
+
+                if let Some(mut partial) = outpoint.remove(&prev_txid) {
+                    partial.extend(chain);
+                    outpoint.insert(txid, partial);
+                } else {
+                    outpoint.insert(txid, chain);
+                }
+            }
+
+        }
+
+        let mut txs = Vec::new();
+        for (_, block_txs) in blocks {
+            for tx in block_txs {
+                if let Some(shit) = outpoint.remove(&tx.txid()) {
+                    txs.push(shit);
+                }
+            }
+        }
+
+        txs
     }
 
     /// Function collect blocks to chain transactions by prevouts
@@ -1052,13 +1036,13 @@ impl ChainQuery {
         for (history, blockid) in history_iter {
             processed_items += 1;
             lastblock = Some(blockid.hash);
-
+            
             match history.key.txinfo {
                 TxHistoryInfo::Funding(ref info) => {
                     let is_inscription = self
                         .store
                         .inscription_db()
-                        .get(&db_key!(TXID_IS_INSCRIPTION, &info.txid))
+                        .get(&InscriptionExtraData::get_db_key(OutPoint { txid: Txid::from_slice(&info.txid).unwrap(), vout: info.vout as u32  }))
                         .is_some();
                     if !is_inscription || info.vout != 0 {
                         utxos.insert(
@@ -1147,16 +1131,13 @@ impl ChainQuery {
         let mut utxos = Vec::new();
 
         let history_iter = history_iter.filter_map(|history| {
-            self.tx_confirming_block(&history.get_txid())
+            self.tx_confirming_block(&history.get_outpoint().txid)
                 .map(|b| (history, b))
         });
 
         for (history, blockid) in history_iter {
             utxos.push((
-                OutPoint {
-                    txid: history.get_txid(),
-                    vout: 0,
-                },
+                history.get_outpoint(),
                 (
                     blockid,
                     history.get_value(),
@@ -1190,13 +1171,14 @@ impl ChainQuery {
                         }
                         None => true,
                     })
-                    .skip_while(|history| last_seen_txid != &history.get_txid()) // skip until we reach the last_seen_txid
+                    .skip_while(|history| last_seen_txid != &history.get_outpoint().txid) // skip until we reach the last_seen_txid
                     .skip(1); // skip last_seen_txid
                 self.ords_iter(history_iter, *limit)
             }
             OrdsSearcher::New(limit, search) => {
                 let history_iter = self
                     .ord_iter_scan_reverse(scripthash)
+                    .map(|x| dbg!(x))
                     .map(OrdHistoryRow::from_row)
                     .filter(|x| match search {
                         Some(v) => {
@@ -1830,13 +1812,13 @@ impl TxConfRow {
 }
 
 #[derive(Serialize, Deserialize)]
-struct TxOutKey {
+pub struct TxOutKey {
     code: u8,
     txid: FullHash,
     vout: u16,
 }
 
-struct TxOutRow {
+pub struct TxOutRow {
     key: TxOutKey,
     value: Bytes, // serialized output
 }
@@ -1852,7 +1834,7 @@ impl TxOutRow {
             value: serialize(txout),
         }
     }
-    fn key(outpoint: &OutPoint) -> Bytes {
+    pub fn key(outpoint: &OutPoint) -> Bytes {
         bincode_util::serialize_little(&TxOutKey {
             code: b'O',
             txid: full_hash(&outpoint.txid[..]),
@@ -2157,7 +2139,7 @@ impl StatsCacheRow {
     }
 }
 
-type CachedUtxoMap = HashMap<(Txid, u32), (u32, Value, Option<InscriptionId>, Option<String>)>; // (txid,vout) => (block_height,output_value)
+type CachedUtxoMap = HashMap<(Txid, u32), (u32, Value, Option<OutPoint>, Option<String>)>; // (txid,vout) => (block_height,output_value)
 
 struct UtxoCacheRow {
     key: ScriptCacheKey,

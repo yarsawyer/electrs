@@ -45,6 +45,6 @@ macro_rules! db_key {
 
 define_prefix! { INSCRIPTION_ID_TO_META, IITM }
 define_prefix! { PARTIAL_TXID_TO_TXIDS, PTTT }
-define_prefix! { LAST_INSCRIPTION_NUMBER, LIN }
-define_prefix! { TXID_IS_INSCRIPTION, TII }
+define_prefix! { INSCRIPTION_NUMBER, IN }
+define_prefix! { OUTPOINT_IS_INSCRIPTION, OI }
 define_prefix! { ADDRESS_TO_ORD_STATS, ATOS }
