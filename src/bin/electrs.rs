@@ -94,20 +94,20 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         .index_inscription(chain.clone(), InscriptionParseBlock::ToHeight(block_offset))
         .unwrap();
 
-    let inscription_updater =
-        InscriptionUpdater::new(store.inscription_db(), store.txstore_db(), store.temp_db())
-            .unwrap();
+    // let inscription_updater =
+    //     InscriptionUpdater::new(store.inscription_db(), store.txstore_db(), store.temp_db())
+    //         .unwrap();
 
-    inscription_updater
-        .copy_from_main_block(block_offset + 1)
-        .unwrap();
+    // inscription_updater
+    //     .copy_from_main_block(block_offset + 1)
+    //     .unwrap();
 
-    indexer
-        .index_temp(
-            chain.clone(),
-            InscriptionParseBlock::FromHeight(block_offset + 1),
-        )
-        .unwrap();
+    // indexer
+    //     .index_temp(
+    //         chain.clone(),
+    //         InscriptionParseBlock::FromHeight(block_offset + 1),
+    //     )
+    //     .unwrap();
 
     let mempool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         Arc::clone(&chain),
@@ -176,22 +176,22 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         if current_tip != tip {
             let (_, removed) = indexer.update(&daemon)?;
 
-            if !removed.is_empty() {
-                inscription_updater
-                    .remove_blocks(removed)
-                    .expect("Something went wrong with removing blocks dickus");
-            }
+            // if !removed.is_empty() {
+            //     inscription_updater
+            //         .remove_blocks(removed)
+            //         .expect("Something went wrong with removing blocks dickus");
+            // }
 
             tip = current_tip;
             let block = store.get_block_height(tip).unwrap() as u32;
 
-            inscription_updater
-                .remove_temp_data_orhpan(block - HEIGHT_DELAY)
-                .unwrap();
+            // inscription_updater
+            //     .remove_temp_data_orhpan(block - HEIGHT_DELAY)
+            //     .unwrap();
 
-            indexer
-                .index_temp(chain.clone(), InscriptionParseBlock::AtHeight(block))
-                .unwrap();
+            // indexer
+            //     .index_temp(chain.clone(), InscriptionParseBlock::AtHeight(block))
+            //     .unwrap();
         };
 
         // Update mempool
