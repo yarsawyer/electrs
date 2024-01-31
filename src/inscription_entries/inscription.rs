@@ -5,18 +5,18 @@ use bitcoin::{hashes::Hash, OutPoint, Txid};
 use itertools::Itertools;
 
 use crate::{
-    db_key,
     inscription_entries::index::PARTIAL_TXID_TO_TXIDS,
     media::Media,
     new_index::DBRow,
-    util::{bincode_util, errors::AsAnyhow, Bytes, TransactionStatus},
+    util::{bincode_util, errors::AsAnyhow, Bytes},
 };
 
 use super::{
     index::{
-        ADDRESS_TO_ORD_STATS, INSCRIPTION_ID_TO_META, INSCRIPTION_NUMBER, OUTPOINT_IS_INSCRIPTION,
+        ADDRESS_TO_ORD_STATS, INSCRIPTION_NUMBER, OUTPOINT_IS_INSCRIPTION,
+        OWNER_LOCATION_TO_INSCRIPTION,
     },
-    Entry, InscriptionId,
+    InscriptionId,
 };
 
 use {
@@ -45,8 +45,8 @@ pub struct OrdHistoryKey {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OrdHistoryValue {
     pub value: u64,
-    pub inscription_id: OutPoint,
     pub inscription_number: u64,
+    pub inscription_id: InscriptionId,
 }
 
 impl OrdHistoryValue {
@@ -62,7 +62,7 @@ pub struct OrdHistoryRow {
 }
 
 impl OrdHistoryRow {
-    pub const CODE: u8 = b'O';
+    pub const CODE: u8 = OWNER_LOCATION_TO_INSCRIPTION.as_bytes()[0];
 
     pub fn new(owner: String, outpoint: OutPoint, value: OrdHistoryValue) -> Self {
         let key = OrdHistoryKey {
@@ -88,6 +88,16 @@ impl OrdHistoryRow {
 
     pub fn get_key(&self) -> Vec<u8> {
         bincode_util::serialize_big(&self.key).unwrap()
+    }
+
+    pub fn create_db_key(address: String, outpoint: &OutPoint) -> Vec<u8> {
+        let key = OrdHistoryKey {
+            owner: address,
+            code: OrdHistoryRow::CODE,
+            outpoint: *outpoint,
+        };
+
+        bincode_util::serialize_big(&key).unwrap()
     }
 
     pub fn into_row(self) -> DBRow {
@@ -121,16 +131,18 @@ impl OrdHistoryRow {
         self.key.owner.clone()
     }
 
-    pub fn get_inscription_id(&self) -> OutPoint {
-        self.value.inscription_id
-    }
-
     pub fn get_inscription_number(&self) -> u64 {
         self.value.inscription_number
     }
 
-    pub fn get_temp_db_key(&self, block_height: u32) -> Vec<u8> {
-        bincode_util::serialize_big(&(self.get_key(), block_height)).unwrap()
+    pub fn get_temp_db_key(address: String, outpoint: &OutPoint, block_height: u32) -> Vec<u8> {
+        let key = OrdHistoryKey {
+            owner: address,
+            code: OrdHistoryRow::CODE,
+            outpoint: *outpoint,
+        };
+
+        bincode_util::serialize_big(&(key, block_height)).unwrap()
     }
 
     pub fn from_temp_db_row(row: DBRow) -> anyhow::Result<(Self, u32)> {
@@ -144,54 +156,77 @@ impl OrdHistoryRow {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct InscriptionMeta {
-    pub content_type: String,
-    pub content_length: usize,
-    pub location: OutPoint,
-    pub genesis: OutPoint,
-    pub number: u64,
-}
+// #[derive(Debug, Deserialize, Serialize)]
+// pub struct TempData {
+//     pub location: OutPoint,
+//     pub block_height: u32,
+//     pub owner: String,
+// }
+// impl TempData {
+//     pub fn new(block_height: u32, location: OutPoint, owner: String) -> Self {
+//         Self {
+//             block_height,
+//             location,
+//             owner,
+//         }
+//     }
 
-impl InscriptionMeta {
-    const ERROR_MESSAGE: &'static str = "Cannot deserialize / serialize InscriptionMeta";
+//     pub fn from_row(value: DBRow) -> anyhow::Result<Self> {
+//         let (_, location): (u8, OutPoint) =
+//             bincode_util::deserialize_big(&value.key).anyhow_as("Cannot deserialize key")?;
 
-    pub fn new(
-        content_type: String,
-        content_length: usize,
-        location: OutPoint,
-        genesis: OutPoint,
-        number: u64,
-    ) -> Self {
-        Self {
-            content_type,
-            content_length,
-            location,
-            genesis,
-            number,
-        }
-    }
+//         let (block_height, owner): (u32, String) =
+//             bincode_util::deserialize_big(&value.value).anyhow_as("Cannot deserialize value")?;
 
-    pub fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
-        bincode_util::deserialize_big(value).anyhow_as(Self::ERROR_MESSAGE)
-    }
+//         Ok(Self {
+//             location,
+//             block_height,
+//             owner,
+//         })
+//     }
 
-    pub fn to_db_row(&self) -> anyhow::Result<DBRow> {
-        Ok(DBRow {
-            key: InscriptionMeta::get_db_key(self.genesis)?,
-            value: bincode_util::serialize_big(self).anyhow_as(Self::ERROR_MESSAGE)?,
-        })
-    }
+//     pub fn to_db_row(&self) -> anyhow::Result<DBRow> {
+//         Ok(DBRow {
+//             key: Self::get_db_key(self.location)?,
+//             value: bincode_util::serialize_big(&(self.block_height, &self.owner))
+//                 .anyhow_as("Cannot serialize TempData")?,
+//         })
+//     }
 
-    pub fn get_db_key(genesis: OutPoint) -> anyhow::Result<Vec<u8>> {
-        Ok(db_key!(
-            INSCRIPTION_ID_TO_META,
-            &genesis.store().anyhow()?
-        ))
-    }
-}
+//     pub fn get_db_key(location: OutPoint) -> anyhow::Result<Vec<u8>> {
+//         bincode_util::serialize_big(&(INSCRIPTION_ID_LOCATION_TO_OWNER, &location)).anyhow()
+//     }
 
+//     pub fn get_temp_db_key(block_height: u32, location: OutPoint) -> Vec<u8> {
+//         bincode_util::serialize_big(&(INSCRIPTION_ID_LOCATION_TO_OWNER, block_height, location))
+//             .unwrap()
+//     }
 
+//     pub fn from_temp_db(row: DBRow) -> anyhow::Result<(Self, u32)> {
+//         let (_, temp_block_height, location): (u8, u32, OutPoint) =
+//             bincode_util::deserialize_big(&row.key).anyhow_as("Cannot deserialize key")?;
+
+//         let (block_height, owner): (u32, String) =
+//             bincode_util::deserialize_big(&row.value).anyhow_as("Cannot deserialize value")?;
+
+//         Ok((
+//             Self {
+//                 location,
+//                 block_height,
+//                 owner,
+//             },
+//             temp_block_height,
+//         ))
+//     }
+
+//     pub fn to_temp_db_row(&self, temp_block_height: u32) -> anyhow::Result<DBRow> {
+//         Ok(DBRow {
+//             key: Self::get_temp_db_key(temp_block_height, self.location),
+//             value: bincode_util::serialize_big(&(self.block_height, &self.owner))
+//                 .anyhow_as("Cannot serialize TempData")?,
+//         })
+//     }
+// }
 
 #[derive(Deserialize, Serialize, Debug, Default)]
 pub struct UserOrdStats {
@@ -209,16 +244,20 @@ impl UserOrdStats {
     }
 
     pub fn owner_from_key(key: Vec<u8>) -> anyhow::Result<String> {
-        let (_, _, owner): (u8, u32, String) =
+        let (_, owner): ([u8; ADDRESS_TO_ORD_STATS.len()], String) =
             bincode_util::deserialize_big(&key).anyhow_as("Cannot deserialize key")?;
         Ok(owner)
     }
 
     pub fn to_db_row(&self, owner: &str) -> anyhow::Result<DBRow> {
         Ok(DBRow {
-            key: db_key!(ADDRESS_TO_ORD_STATS, owner.as_bytes()),
+            key: Self::get_db_key(owner)?,
             value: bincode_util::serialize_big(self).anyhow_as("Cannot serialize UserOrdStats")?,
         })
+    }
+
+    pub fn get_db_key(owner: &str) -> anyhow::Result<Vec<u8>> {
+        bincode_util::serialize_big(&(ADDRESS_TO_ORD_STATS, owner)).anyhow()
     }
 
     pub fn get_temp_db_key(block_height: u32, owner: &str) -> Vec<u8> {
@@ -246,60 +285,122 @@ impl UserOrdStats {
         Ok((stats, owner))
     }
 }
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct InscriptionExtraDataValue {
+    pub owner: String,
+    pub content_type: String,
+    pub genesis: OutPoint,
+    pub block_height: u32,
+    pub content_length: usize,
+    pub number: u64,
+    pub offset: u64,
+}
+
+impl InscriptionExtraDataValue {
+    pub fn from_raw(value: Vec<u8>) -> anyhow::Result<Self> {
+        bincode_util::deserialize_big(&value).anyhow_as("Cannot deserialize value")
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct InscriptionExtraData {
-    pub genesis: OutPoint,
     pub location: OutPoint,
-    pub owner: String,
-    pub block_height: u32,
+    #[serde(flatten)]
+    pub value: InscriptionExtraDataValue,
 }
 
 impl InscriptionExtraData {
     const ERROR_MESSAGE: &'static str = "Cannot deserialize / serialize InscriptionExtraData";
 
-    pub fn new(location: OutPoint, genesis: OutPoint, owner: String, block_height: u32) -> Self {
+    pub fn new(
+        location: OutPoint,
+        genesis: OutPoint,
+        owner: String,
+        block_height: u32,
+        content_type: String,
+        content_length: usize,
+        number: u64,
+        offset: u64,
+    ) -> Self {
         Self {
-            genesis,
             location,
-            owner,
-            block_height,
+            value: InscriptionExtraDataValue {
+                owner,
+                genesis,
+                block_height,
+                content_length,
+                content_type,
+                number,
+                offset,
+            },
         }
     }
 
-    pub fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
-        bincode_util::deserialize_big(value).anyhow_as(Self::ERROR_MESSAGE)
+    pub fn from_raw(value: DBRow) -> anyhow::Result<Self> {
+        let txid = Txid::from_slice(
+            &value.key[OUTPOINT_IS_INSCRIPTION.len()..OUTPOINT_IS_INSCRIPTION.len() + 32],
+        )
+        .anyhow()?;
+        let vout: u32 = u32::from_be_bytes(
+            value.key[OUTPOINT_IS_INSCRIPTION.len() + 32..]
+                .try_into()
+                .anyhow()?,
+        );
+
+        let location = OutPoint::new(txid, vout);
+
+        let value: InscriptionExtraDataValue =
+            bincode_util::deserialize_big(&value.value).anyhow_as(Self::ERROR_MESSAGE)?;
+
+        Ok(Self { location, value })
     }
 
-    pub fn to_db_row(&self, outpoint: OutPoint) -> anyhow::Result<DBRow> {
+    pub fn to_db_row(&self) -> anyhow::Result<DBRow> {
         Ok(DBRow {
-            key: Self::get_db_key(outpoint),
-            value: bincode_util::serialize_big(self).anyhow_as(Self::ERROR_MESSAGE)?,
+            key: Self::get_db_key(self.location),
+            value: bincode_util::serialize_big(&self.value).anyhow_as(Self::ERROR_MESSAGE)?,
         })
     }
 
-    pub fn get_temp_db_key(block_height: u32, txid: &Txid) -> Vec<u8> {
-        bincode_util::serialize_big(&(OUTPOINT_IS_INSCRIPTION, block_height, txid)).unwrap()
+    pub fn get_temp_db_key(block_height: u32, location: &OutPoint) -> Vec<u8> {
+        bincode_util::serialize_big(&(OUTPOINT_IS_INSCRIPTION, block_height, location)).unwrap()
     }
 
-    pub fn from_temp_db(row: DBRow) -> anyhow::Result<(Self, Txid)> {
-        let (_, _, txid): ([u8; OUTPOINT_IS_INSCRIPTION.len()], u32, Txid) =
+    pub fn get_temp_db_iter_key(block_height: u32) -> Vec<u8> {
+        bincode_util::serialize_big(&(OUTPOINT_IS_INSCRIPTION, block_height)).unwrap()
+    }
+
+    pub fn from_temp_db(row: DBRow) -> anyhow::Result<(Self, u32)> {
+        let (_, block_height, location): ([u8; OUTPOINT_IS_INSCRIPTION.len()], u32, OutPoint) =
             bincode_util::deserialize_big(&row.key).anyhow_as(Self::ERROR_MESSAGE)?;
 
-        let extra_data: InscriptionExtraData =
+        let extra_data: InscriptionExtraDataValue =
             bincode_util::deserialize_big(&row.value).anyhow_as(Self::ERROR_MESSAGE)?;
 
-        Ok((extra_data, txid))
+        Ok((
+            Self {
+                location,
+                value: extra_data,
+            },
+            block_height,
+        ))
     }
 
-    pub fn to_temp_db_row(&self, block_height: u32, txid: &Txid) -> anyhow::Result<DBRow> {
+    pub fn to_temp_db_row(&self, block_height: u32, location: &OutPoint) -> anyhow::Result<DBRow> {
         Ok(DBRow {
-            key: Self::get_temp_db_key(block_height, txid),
-            value: bincode_util::serialize_big(self).anyhow_as(Self::ERROR_MESSAGE)?,
+            key: Self::get_temp_db_key(block_height, location),
+            value: bincode_util::serialize_big(&self.value).anyhow_as(Self::ERROR_MESSAGE)?,
         })
     }
 
     pub fn get_db_key(outpoint: OutPoint) -> Vec<u8> {
-        bincode_util::serialize_big(&(OUTPOINT_IS_INSCRIPTION, outpoint.store().unwrap().as_slice())).unwrap()
+        [
+            OUTPOINT_IS_INSCRIPTION.as_bytes(),
+            &outpoint.txid.into_inner(),
+            &outpoint.vout.to_be_bytes(),
+        ]
+        .concat()
     }
 }
 
@@ -340,18 +441,15 @@ impl PartialTxs {
     }
 
     pub fn get_db_key(&self) -> Vec<u8> {
-        db_key!(PARTIAL_TXID_TO_TXIDS, &self.last_txid.into_inner())
+        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, self.last_txid)).unwrap()
     }
 
     pub fn get_temp_iter_key(block_height: u32) -> Vec<u8> {
-        db_key!(PARTIAL_TXID_TO_TXIDS, &block_height.to_be_bytes())
+        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, block_height)).unwrap()
     }
 
     pub fn get_temp_db_key(block_height: u32, txid: &Txid) -> Vec<u8> {
-        db_key!(
-            PARTIAL_TXID_TO_TXIDS,
-            &[&block_height.to_be_bytes(), txid.into_inner().as_slice()].concat()
-        )
+        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, block_height, txid)).unwrap()
     }
 
     pub fn to_temp_db_row(&self) -> anyhow::Result<DBRow> {

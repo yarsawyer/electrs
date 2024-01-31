@@ -8,9 +8,9 @@ extern crate tracing;
 extern crate electrs;
 
 use error_chain::ChainedError;
-use std::process;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{process, time::Instant};
 
 use electrs::{
     config::Config,
@@ -78,36 +78,26 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &metrics,
     ));
 
-    //todo: handle this .unwrap() stupid bitch
-    // let block_from = if let Some(hash) = last_indexed_block {
-    //     //let hash = bitcoin::consensus::encode::deserialize(&raw_hash).expect("invalid chain tip in `t`");
-    //     store
-    //         .get_block_height(hash)
-    //         .unwrap_or(config.first_inscription_block)
-    // } else {
-    //     config.first_inscription_block
-    // };
-
     let block_offset = tip_height - HEIGHT_DELAY;
 
     indexer
-        .index_inscription(chain.clone(), InscriptionParseBlock::ToHeight(block_offset))
+        .index_inscription(InscriptionParseBlock::ToHeight(block_offset))
         .unwrap();
 
-    // let inscription_updater =
-    //     InscriptionUpdater::new(store.inscription_db(), store.txstore_db(), store.temp_db())
-    //         .unwrap();
+    let inscription_updater =
+        InscriptionUpdater::new(store.inscription_db(), store.txstore_db(), store.temp_db())
+            .unwrap();
 
-    // inscription_updater
-    //     .copy_from_main_block(block_offset + 1)
-    //     .unwrap();
+    inscription_updater
+        .copy_from_main_block(block_offset + 1)
+        .unwrap();
 
-    // indexer
-    //     .index_temp(
-    //         chain.clone(),
-    //         InscriptionParseBlock::FromHeight(block_offset + 1),
-    //     )
-    //     .unwrap();
+    indexer
+        .index_temp(
+            chain.clone(),
+            InscriptionParseBlock::FromHeight(block_offset + 1),
+        )
+        .unwrap();
 
     let mempool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         Arc::clone(&chain),
@@ -176,22 +166,23 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         if current_tip != tip {
             let (_, removed) = indexer.update(&daemon)?;
 
-            // if !removed.is_empty() {
-            //     inscription_updater
-            //         .remove_blocks(removed)
-            //         .expect("Something went wrong with removing blocks dickus");
-            // }
-
             tip = current_tip;
             let block = store.get_block_height(tip).unwrap() as u32;
 
-            // inscription_updater
-            //     .remove_temp_data_orhpan(block - HEIGHT_DELAY)
-            //     .unwrap();
+            if !removed.is_empty() {
+                error!("Reorg happened, blocks lenght: {}", removed.len());
+                inscription_updater
+                    .reorg_handler(removed)
+                    .expect("Something went wrong with removing blocks");
+            } else {
+                inscription_updater
+                    .remove_temp_data_orhpan(block - HEIGHT_DELAY)
+                    .unwrap();
+            }
 
-            // indexer
-            //     .index_temp(chain.clone(), InscriptionParseBlock::AtHeight(block))
-            //     .unwrap();
+            indexer
+                .index_temp(chain.clone(), InscriptionParseBlock::AtHeight(block))
+                .unwrap();
         };
 
         // Update mempool

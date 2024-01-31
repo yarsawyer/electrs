@@ -2,8 +2,8 @@ use super::*;
 
 #[derive(Debug, PartialEq, Copy, Clone, Hash, Eq)]
 pub struct InscriptionId {
-    pub(crate) txid: Txid,
-    pub(crate) index: u32,
+    pub txid: Txid,
+    pub index: u32,
 }
 
 impl<'de> Deserialize<'de> for InscriptionId {
@@ -27,6 +27,24 @@ impl Serialize for InscriptionId {
 impl Display for InscriptionId {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{}i{}", self.txid, self.index)
+    }
+}
+
+impl Into<OutPoint> for InscriptionId {
+    fn into(self) -> OutPoint {
+        OutPoint {
+            txid: self.txid,
+            vout: self.index,
+        }
+    }
+}
+
+impl From<OutPoint> for InscriptionId {
+    fn from(outpoint: OutPoint) -> Self {
+        Self {
+            txid: outpoint.txid,
+            index: outpoint.vout,
+        }
     }
 }
 
