@@ -26,7 +26,7 @@ pub mod config;
 pub mod daemon;
 pub mod electrum;
 pub mod errors;
-mod inscription_entries;
+pub mod inscription_entries;
 mod media;
 pub mod metrics;
 pub mod new_index;

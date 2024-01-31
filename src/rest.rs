@@ -1,6 +1,7 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
-use crate::inscription_entries::inscription::InscriptionMeta;
+use crate::errors;
+use crate::inscription_entries::InscriptionId;
 use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::schema::OrdsSearcher;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
@@ -10,13 +11,12 @@ use crate::util::{
     has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
     ScriptToAddr, ScriptToAsm, TransactionStatus,
 };
-use crate::{db_key, errors};
 
 use {bitcoin::consensus::encode, std::str::FromStr};
 
 use bitcoin::blockdata::opcodes;
 use bitcoin::hashes::hex::{FromHex, ToHex};
-use bitcoin::hashes::{Error as HashError, Hash};
+use bitcoin::hashes::Error as HashError;
 use hex::{self, FromHexError};
 
 use hyper::service::{make_service_fn, service_fn};
@@ -299,12 +299,20 @@ fn is_bare_multisig(script: &Script) -> bool {
         && script[0] <= script[len - 2]
 }
 
+#[derive(Serialize, Debug)]
+pub struct InscriptionMeta {
+    pub content_type: String,
+    pub content_lenght: usize,
+    pub inscription_id: InscriptionId,
+    pub inscription_number: u64,
+}
+
 #[derive(Serialize)]
-struct UtxoValue {
+pub struct UtxoValue {
     txid: Txid,
     vout: u32,
     status: TransactionStatus,
-    value: u64,
+    pub value: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(flatten)]
     inscription_meta: Option<InscriptionMeta>,
@@ -1162,17 +1170,6 @@ fn handle_request(
         (&Method::GET, Some(&"mempool"), None, None, None, None) => {
             json_response(query.mempool().backlog_stats(), TTL_SHORT)
         }
-        // (&Method::GET, Some(&"test"), Some(shit), None, None, None) => {
-        //     let tx = query.chain().store().inscription_db().get(&db_key!(
-        //         OUTPOINT_IS_INSCRIPTION,
-        //         &Txid::from_str(shit).unwrap().into_inner()
-        //     ));
-        //     if let Some(_) = tx {
-        //         return json_response(json!({ "founded": true }), 0);
-        //     } else {
-        //         http_message(StatusCode::BAD_REQUEST, "shit", 0)
-        //     }
-        // }
         (&Method::GET, Some(&"mempool"), Some(&"txids"), None, None, None) => {
             json_response(query.mempool().txids(), TTL_SHORT)
         }

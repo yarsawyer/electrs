@@ -2,7 +2,6 @@ use crate::chain::{BlockHash, BlockHeader};
 use crate::errors::*;
 use crate::new_index::BlockEntry;
 
-use itertools::Itertools;
 use std::collections::HashMap;
 use std::fmt;
 use std::iter::FromIterator;

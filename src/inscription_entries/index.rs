@@ -32,19 +32,9 @@ macro_rules! define_prefix {
     };
 }
 
-#[macro_export]
-macro_rules! db_key {
-    ($str:expr, $bytes:expr) => {{
-        let str_as_bytes = $str.as_bytes();
-        let mut result = Vec::with_capacity(str_as_bytes.len() + $bytes.len());
-        result.extend_from_slice(str_as_bytes);
-        result.extend_from_slice($bytes);
-        result
-    }};
-}
-
-define_prefix! { INSCRIPTION_ID_TO_META, IITM }
-define_prefix! { PARTIAL_TXID_TO_TXIDS, PTTT }
-define_prefix! { INSCRIPTION_NUMBER, IN }
-define_prefix! { OUTPOINT_IS_INSCRIPTION, OI }
-define_prefix! { ADDRESS_TO_ORD_STATS, ATOS }
+define_prefix! { PARTIAL_TXID_TO_TXIDS, A }
+define_prefix! { INSCRIPTION_NUMBER, B }
+define_prefix! { OUTPOINT_IS_INSCRIPTION, C }
+define_prefix! { ADDRESS_TO_ORD_STATS, D }
+define_prefix! { OWNER_LOCATION_TO_INSCRIPTION, E }
+// define_prefix! { INSCRIPTION_ID_LOCATION_TO_OWNER, F }
