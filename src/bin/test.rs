@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use electrs::{config::Config, new_index::DB, util::bincode_util};
+use electrs::{config::Config, new_index::DB};
 
 fn main() -> anyhow::Result<()> {
     let config = Config::from_args();

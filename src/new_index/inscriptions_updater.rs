@@ -11,10 +11,7 @@ use crate::{
         InscriptionId,
     },
     measure_time,
-    new_index::{
-        schema::TxOutRow,
-        token::{self, TokenKey, TokenValue, TransferProto},
-    },
+    new_index::{schema::TxOutRow, token::TransferProto},
     util::{bincode_util, errors::AsAnyhow, full_hash, HeaderEntry, ScriptToAddr},
 };
 use anyhow::{Ok, Result};
@@ -24,14 +21,10 @@ use itertools::Itertools;
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
-use serde::{de::value, Serialize};
 
 use super::{
     schema::{BlockRow, TxRow},
-    token::{
-        DeployProto, MintProto, TokenAccountKey, TokenAccountValue, TokenAction, TokenCache,
-        TokenTransferKey, TokenTransferValue, TokensData, BRC,
-    },
+    token::{TokenCache, TokensData},
     DBRow, Store, DB,
 };
 pub struct InscriptionUpdater {
