@@ -37,6 +37,10 @@ use crate::new_index::db::{DBFlush, DBRow, ReverseScanIterator, ScanIterator, DB
 use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
 
 use super::inscriptions_updater::{load_txos, InscriptionUpdater};
+use super::token::{
+    TokenAccountKey, TokenAccountValue, TokenBalance, TokenTransferKey, TokenTransferValue,
+    TransferProto,
+};
 
 const MIN_HISTORY_ITEMS_TO_CACHE: usize = 50;
 
@@ -478,19 +482,20 @@ impl Indexer {
                 let chunked = measure_time! {"Load blocks txs": {indexer.load_blocks_chunks(blocks_chunk.collect_vec())}};
 
                 // Handle inscriptions in blocks
-                let inscriptions = measure_time! {"Seek inc": {indexer.handle_blocks(&chunked, &mut token_cache)}};
+                let inscriptions =
+                    measure_time! {"Seek inc": {indexer.handle_blocks(&chunked, &mut token_cache)}};
                 measure_time! {"Write inc": {indexer.write_inscription(inscriptions).unwrap()}};
 
                 // Handle moves in blocks
                 let moves = measure_time! {"Seek moves/ hndl tokens": {move_indexer.handle(&chunked, &mut token_cache)}};
                 measure_time! {"Write moves": {move_indexer.write_moves(moves).unwrap()}};
-                
+
                 warn!("Token actions {}", token_cache.token_actions.len());
                 warn!("Token all tx {}", token_cache.all_transfers.len());
                 warn!("Token valid tx {}", token_cache.valid_transfers.len());
                 measure_time! {"Load tokens data": token_cache.load_tokens_data(self.store.token_db())};
                 // sort by height and tx idx
-                measure_time! {"Sort token action": 
+                measure_time! {"Sort token action":
                 token_cache.token_actions.sort_unstable_by(|a,b|{
                     a.0.cmp(&b.0).then(a.1.cmp(&b.1))
                 })
@@ -1039,6 +1044,40 @@ impl ChainQuery {
 
                 stats
             }))
+    }
+
+    pub fn tokens(&self, scripthash: String) -> anyhow::Result<Vec<TokenBalance>> {
+        let _timer = self.start_timer("tokens");
+
+        let mut amount_by_tick = HashMap::new();
+
+        self.store
+            .token_db
+            .iter_scan(&TokenAccountKey::iter_key(&scripthash))
+            .for_each(|x| {
+                let tick = TokenAccountKey::parse_account_key(x.key).tick;
+                let amount = TokenAccountValue::from_db_value(&x.value).amount;
+                amount_by_tick.insert(tick, (amount, 0));
+            });
+
+        self.store
+            .token_db
+            .iter_scan(&TokenTransferKey::iter_key(&scripthash))
+            .for_each(|x| {
+                let TransferProto::Bel20 { tick, amt } =
+                    TokenTransferValue::from_db_value(&x.value).proto;
+                amount_by_tick.get_mut(&tick).unwrap().1 += amt;
+            });
+
+        let result = amount_by_tick
+            .into_iter()
+            .map(|(tick, (balance, transferable_balance))| TokenBalance {
+                tick,
+                balance,
+                transferable_balance,
+            })
+            .collect();
+        Ok(result)
     }
 
     // TODO: avoid duplication

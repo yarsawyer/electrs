@@ -946,6 +946,30 @@ fn handle_request(
             json_response(utxos, TTL_SHORT)
         }
         // todo update md
+        (
+            &Method::GET,
+            Some(script_type @ &"address"),
+            Some(script_str),
+            Some(&"tokens"),
+            None,
+            None,
+        )
+        | (
+            &Method::GET,
+            Some(script_type @ &"scripthash"),
+            Some(script_str),
+            Some(&"tokens"),
+            None,
+            None,
+        ) => {
+            to_scripthash(script_type, script_str, config.network_type)?;
+            let balance = query
+                .chain()
+                .tokens(script_str.to_string())
+                .map_err(|_| "Unexpected error".to_owned())?;
+            json_response(balance, TTL_SHORT)
+        }
+        // todo update md
         // (&Method::GET, Some(&"discovery"), None, None, None, None) => {
         //     let ords = query.chain().discovery(query.config().utxos_limit)?;
         //     json_response(ords, TTL_SHORT)
