@@ -479,29 +479,19 @@ impl Indexer {
 
         {
             for blocks_chunk in blocks.into_iter().chunks(CHUNK_SIZE).into_iter() {
-                let chunked = measure_time! {"Load blocks txs": {indexer.load_blocks_chunks(blocks_chunk.collect_vec())}};
+                let chunked = indexer.load_blocks_chunks(blocks_chunk.collect_vec());
 
                 // Handle inscriptions in blocks
-                let inscriptions =
-                    measure_time! {"Seek inc": {indexer.handle_blocks(&chunked, &mut token_cache)}};
-                measure_time! {"Write inc": {indexer.write_inscription(inscriptions).unwrap()}};
+                let inscriptions = indexer.handle_blocks(&chunked, &mut token_cache);
+                indexer.write_inscription(inscriptions).unwrap();
 
                 // Handle moves in blocks
-                let moves = measure_time! {"Seek moves/ hndl tokens": {move_indexer.handle(&chunked, &mut token_cache)}};
-                measure_time! {"Write moves": {move_indexer.write_moves(moves).unwrap()}};
+                let moves = move_indexer.handle(&chunked, &mut token_cache);
+                move_indexer.write_moves(moves).unwrap();
 
-                warn!("Token actions {}", token_cache.token_actions.len());
-                warn!("Token all tx {}", token_cache.all_transfers.len());
-                warn!("Token valid tx {}", token_cache.valid_transfers.len());
-                measure_time! {"Load tokens data": token_cache.load_tokens_data(self.store.token_db())};
-                // sort by height and tx idx
-                measure_time! {"Sort token action":
-                token_cache.token_actions.sort_unstable_by(|a,b|{
-                    a.0.cmp(&b.0).then(a.1.cmp(&b.1))
-                })
-                };
-                measure_time! {"Do token action": {token_cache.do_token_action()}};
-                measure_time! {"Write tokens data": {token_cache.write_token_data(self.store.token_db())}};
+                token_cache.load_tokens_data(self.store.token_db());
+                token_cache.process_token_actions();
+                token_cache.write_token_data(self.store.token_db());
 
                 progress.inc(CHUNK_SIZE as u64)
             }

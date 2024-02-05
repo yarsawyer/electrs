@@ -10,24 +10,20 @@ use itertools::Itertools;
 use postcard;
 use serde::Deserialize;
 use serde_with::serde_as;
-use serde_with::DisplayFromStr;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 #[serde(tag = "op")]
+#[serde(rename_all = "lowercase")]
 pub enum BRC {
-    #[serde(rename = "mint")]
     Mint {
         #[serde(flatten)]
         proto: MintProto,
     },
-    #[serde(rename = "deploy")]
     Deploy {
         #[serde(flatten)]
         proto: DeployProto,
     },
-    #[serde(rename = "transfer")]
     Transfer {
         #[serde(flatten)]
         proto: TransferProto,
@@ -41,7 +37,7 @@ pub enum MintProto {
     #[serde(rename = "bel-20")]
     Bel20 {
         tick: String,
-        #[serde(with = "::serde_with::As::<DisplayFromStr>")]
+        #[serde_as(as = "DisplayFromStr")]
         amt: u64,
     },
 }
@@ -52,14 +48,14 @@ pub enum DeployProto {
     #[serde(rename = "bel-20")]
     Bel20 {
         tick: String,
-        #[serde(with = "::serde_with::As::<DisplayFromStr>")]
+        #[serde_as(as = "DisplayFromStr")]
         max: u64,
-        #[serde(with = "::serde_with::As::<DisplayFromStr>")]
+        #[serde_as(as = "DisplayFromStr")]
         lim: u128,
-        #[serde(with = "::serde_with::As::<DisplayFromStr>")]
+        #[serde_as(as = "DisplayFromStr")]
         #[serde(default = "DeployProto::default_dec")]
         dec: u8,
-        #[serde(with = "::serde_with::As::<DisplayFromStr>")]
+        #[serde_as(as = "DisplayFromStr")]
         #[serde(default = "DeployProto::default_supply")]
         supply: u64,
     },
@@ -83,17 +79,26 @@ pub enum TransferProto {
     #[serde(rename = "bel-20")]
     Bel20 {
         tick: String,
-        #[serde(with = "::serde_with::As::<DisplayFromStr>")]
+        #[serde_as(as = "DisplayFromStr")]
         amt: u64,
     },
 }
 
 #[derive(Default)]
 pub struct TokenCache {
+    // All tokens. Used to check if a transfer is valid. Used like cache, loaded from db before parsing.
     pub tokens: HashMap<TokenKey, TokenValue>,
+
+    // All token accounts. Used to check if a transfer is valid. Used like cache, loaded from db before parsing.
     pub token_accounts: HashMap<TokenAccountKey, TokenAccountValue>,
+
+    // All token actions that not validated yet but just parsed.
     pub token_actions: Vec<(u32, usize, TokenAction)>,
+
+    // All transfer actions. Used to check if a transfer is valid. Used like cache.
     pub all_transfers: HashMap<OutPoint, TransferProto>,
+
+    // All transfer actions that are valid. Used to write to the db.
     pub valid_transfers: HashMap<OutPoint, (String, TransferProto)>,
 }
 impl TokenCache {
@@ -106,7 +111,6 @@ impl TokenCache {
             | "application/json;charset=utf-8" => {
                 let data = String::from_utf8(content.to_vec()).ok()?;
                 let brc = serde_json::from_str::<BRC>(&data.to_lowercase()).ok()?;
-                //let brc = serde_json::from_str::<BRC>(&data.to_lowercase()).catch(&format!("PROBLEM: {data}"))?;
 
                 match &brc {
                     BRC::Mint {
@@ -159,10 +163,12 @@ impl TokenCache {
             _ => {}
         }
     }
+
     pub fn extend(&mut self, cache: TokenCache) {
         self.token_actions.extend(cache.token_actions);
         self.all_transfers.extend(cache.all_transfers);
     }
+
     pub fn try_transfered(&mut self, h: u32, idx: usize, location: OutPoint, recipient: String) {
         if !self.all_transfers.contains_key(&location)
             || !self.valid_transfers.contains_key(&location)
@@ -178,6 +184,7 @@ impl TokenCache {
             },
         ));
     }
+
     pub fn load_tokens_data(&mut self, token_db: &DB) {
         let mut tickers = HashSet::new();
         let mut users = HashSet::new();
@@ -253,7 +260,11 @@ impl TokenCache {
         self.token_accounts = token_accounts;
     }
 
-    pub fn do_token_action(&mut self) {
+    pub fn process_token_actions(&mut self) {
+        // We should sort token actions before processing them.
+        self.token_actions
+            .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
         for (_, _, action) in self.token_actions.drain(..) {
             match action {
                 TokenAction::Deploy { genesis, proto } => {
@@ -365,6 +376,7 @@ impl TokenCache {
         warn!("token_acc len {}", token_accounts.len());
         token_db.write(token_accounts, super::db::DBFlush::Disable);
     }
+
     pub fn write_valid_transfers(&mut self, token_db: &DB) {
         if !self.valid_transfers.is_empty() {
             let transfers = self
