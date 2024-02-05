@@ -86,10 +86,10 @@ pub enum TransferProto {
 
 #[derive(Default)]
 pub struct TokenCache {
-    // All tokens. Used to check if a transfer is valid. Used like cache, loaded from db before parsing.
+    // All tokens. Used to check if a transfer is valid. Used like a cache, loaded from db before parsing.
     pub tokens: HashMap<TokenKey, TokenValue>,
 
-    // All token accounts. Used to check if a transfer is valid. Used like cache, loaded from db before parsing.
+    // All token accounts. Used to check if a transfer is valid. Used like a cache, loaded from db before parsing.
     pub token_accounts: HashMap<TokenAccountKey, TokenAccountValue>,
 
     // All token actions that not validated yet but just parsed.
@@ -170,6 +170,7 @@ impl TokenCache {
     }
 
     pub fn try_transfered(&mut self, h: u32, idx: usize, location: OutPoint, recipient: String) {
+        // ! Check if this is correct.
         if !self.all_transfers.contains_key(&location)
             || !self.valid_transfers.contains_key(&location)
         {
@@ -402,19 +403,23 @@ impl TokenCache {
 
 #[derive(Clone)]
 pub enum TokenAction {
+    // Deploy new token action.
     Deploy {
         genesis: OutPoint,
         proto: DeployProto,
     },
+    // Mint new token action.
     Mint {
         owner: String,
         proto: MintProto,
     },
+    // Transfer token action.
     Transfer {
         location: OutPoint,
         owner: String,
         proto: TransferProto,
     },
+    // ? Transfered token action.
     Transfered {
         transfer_location: OutPoint,
         recipient: String,
