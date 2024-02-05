@@ -779,12 +779,10 @@ fn handle_request(
                     after_txid.as_ref()
                 };
 
-                match query.chain().history(
-                    &script_hash[..],
-                    after_txid_ref,
-                    max_txs - txs.len(),
-                    script_str.to_string(),
-                ) {
+                match query
+                    .chain()
+                    .history(&script_hash[..], after_txid_ref, max_txs - txs.len())
+                {
                     Ok(mempool_txs) => {
                         txs.extend(
                             mempool_txs
@@ -827,23 +825,22 @@ fn handle_request(
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_default_chain_txs_per_page);
 
-            let txs = match query.chain().history(
-                &script_hash[..],
-                last_seen_txid.as_ref(),
-                max_txs,
-                script_str.to_string(),
-            ) {
-                Ok(txs) => txs
-                    .into_iter()
-                    .map(|(tx, blockid)| (tx, Some(blockid)))
-                    .collect(),
-                Err(e) => {
-                    return Err(HttpError(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        format!("{e:?}"),
-                    ));
-                }
-            };
+            let txs =
+                match query
+                    .chain()
+                    .history(&script_hash[..], last_seen_txid.as_ref(), max_txs)
+                {
+                    Ok(txs) => txs
+                        .into_iter()
+                        .map(|(tx, blockid)| (tx, Some(blockid)))
+                        .collect(),
+                    Err(e) => {
+                        return Err(HttpError(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("{e:?}"),
+                        ));
+                    }
+                };
 
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
         }

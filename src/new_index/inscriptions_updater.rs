@@ -1,6 +1,6 @@
-use std::{collections::HashMap, convert::TryInto};
-
+use std::{collections::{HashMap, HashSet}, convert::TryInto, sync::Arc, time::Instant};
 use crate::{
+    measure_time,
     inscription_entries::{
         index::PARTIAL_TXID_TO_TXIDS,
         inscription::Inscription,
@@ -10,34 +10,28 @@ use crate::{
         },
         InscriptionId,
     },
-    new_index::schema::TxOutRow,
+    new_index::{schema::TxOutRow, token::{self, TokenKey, TokenValue, TransferProto}},
     util::{bincode_util, errors::AsAnyhow, full_hash, HeaderEntry, ScriptToAddr},
 };
 use anyhow::{Ok, Result};
-use bitcoin::{consensus::Decodable, hashes::Hash, Address, BlockHash, OutPoint, Script, TxOut};
+use bitcoin::{consensus::Decodable, hashes::Hash, BlockHash, OutPoint, TxOut};
 use bitcoin::{Transaction, Txid};
 use itertools::Itertools;
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
+use serde::{de::value, Serialize};
 
 use super::{
-    schema::{BlockRow, TxRow},
-    DBRow, Store, DB,
+    schema::{BlockRow, TxRow}, token::{DeployProto, MintProto, TokenAccountKey, TokenAccountValue, TokenAction, TokenCache, TokenTransferKey, TokenTransferValue, TokensData, BRC}, DBRow, Store, DB
 };
-pub struct InscriptionUpdater<'a> {
-    inscription_db: &'a DB,
-    tx_db: &'a DB,
-    temp_db: &'a DB,
+pub struct InscriptionUpdater {
+    store: Arc<Store>,
 }
 
-impl<'a> InscriptionUpdater<'a> {
-    pub fn new(inscription_db: &'a DB, tx_db: &'a DB, temp_db: &'a DB) -> Result<Self> {
-        Ok(Self {
-            inscription_db,
-            tx_db,
-            temp_db,
-        })
+impl InscriptionUpdater {
+    pub fn new(store: Arc<Store>) -> Result<Self> {
+        Ok(Self { store })
     }
 
     pub fn index_transaction_inscriptions(
@@ -58,7 +52,8 @@ impl<'a> InscriptionUpdater<'a> {
             };
 
             if let Some(mut inscription_extra) = self
-                .inscription_db
+                .store
+                .inscription_db()
                 .remove(&InscriptionExtraData::get_db_key(prev_outpoint))
                 .map(|x| {
                     InscriptionExtraData::from_raw(DBRow {
@@ -75,30 +70,11 @@ impl<'a> InscriptionUpdater<'a> {
 
                 let inputs_cum = InscriptionSearcher::calc_offsets(&tx, &txos);
 
-                let Result::Ok((vout, offset)) = InscriptionSearcher::get_output_index_by_input(
-                    inputs_cum
-                        .get(idx)
-                        .copied()
-                        .map(|x| x + inscription_extra.value.offset),
-                    &tx.output,
-                ) else {
-                    inscription_extra.value.owner = "leaked 😭".to_owned();
-                    self.inscription_db.write(
-                        vec![inscription_extra.to_db_row()?],
-                        crate::new_index::db::DBFlush::Disable,
-                    );
-                    // info!(
-                    //     "Leaked inscription: {:?} - offset: {}",
-                    //     tx.txid(),
-                    //     inscription_extra.value.offset
-                    // );
-                    continue;
-                };
-
                 // Work with old user
                 let prev_history_value = {
                     let prev_history_value = self
-                        .inscription_db
+                        .store
+                        .inscription_db()
                         .remove(&OrdHistoryRow::create_db_key(
                             old_owner.clone(),
                             &prev_outpoint,
@@ -118,20 +94,33 @@ impl<'a> InscriptionUpdater<'a> {
                     prev_history_value
                 };
 
+                self.store
+                    .temp_db()
+                    .write(to_write, super::db::DBFlush::Disable);
+
+                let Result::Ok((vout, offset)) = InscriptionSearcher::get_output_index_by_input(
+                    inputs_cum
+                        .get(idx)
+                        .copied()
+                        .map(|x| x + inscription_extra.value.offset),
+                    &tx.output,
+                ) else {
+                    inscription_extra.value.owner = "leaked 😭".to_owned();
+                    self.store.inscription_db().write(
+                        vec![inscription_extra.to_db_row()?],
+                        crate::new_index::db::DBFlush::Disable,
+                    );
+
+                    continue;
+                };
+
                 let new_outpoint = OutPoint { txid, vout };
 
                 // Work with new user
                 let ord_history = {
-                    let new_owner = tx
-                        .output
-                        .first()
-                        .and_then(|x| {
-                            Address::from_script(
-                                &x.script_pubkey,
-                                bitcoin::network::constants::Network::Bitcoin,
-                            )
-                        })
-                        .map(|x| x.to_string())
+                    let new_owner = tx.output[0]
+                        .script_pubkey
+                        .to_address_str(crate::chain::Network::Bellscoin)
                         .anyhow_as("No owner :(")?;
 
                     inscription_extra.value.owner = new_owner.clone();
@@ -142,9 +131,7 @@ impl<'a> InscriptionUpdater<'a> {
                 inscription_extra.location = new_outpoint;
                 inscription_extra.value.offset = offset;
 
-                self.temp_db.write(to_write, super::db::DBFlush::Disable);
-
-                self.inscription_db.write(
+                self.store.inscription_db().write(
                     vec![ord_history.into_row(), inscription_extra.to_db_row()?],
                     super::db::DBFlush::Disable,
                 );
@@ -156,7 +143,7 @@ impl<'a> InscriptionUpdater<'a> {
 
             let txs = {
                 let txsids = {
-                    match self.temp_db.remove(&partial_key) {
+                    match self.store.temp_db().remove(&partial_key) {
                         None => vec![txid],
                         Some(partials) => {
                             PartialTxs::from_db(DBRow {
@@ -175,7 +162,8 @@ impl<'a> InscriptionUpdater<'a> {
                     .collect_vec();
 
                 let mut txs = self
-                    .tx_db
+                    .store
+                    .txstore_db()
                     .db
                     .multi_get(key)
                     .into_iter()
@@ -201,16 +189,14 @@ impl<'a> InscriptionUpdater<'a> {
                         txs: txs.into_iter().map(|x| x.txid()).collect_vec(),
                     };
 
-                    self.temp_db
+                    self.store
+                        .temp_db()
                         .write(vec![row.to_temp_db_row()?], super::db::DBFlush::Disable);
                 }
 
                 ParsedInscription::Complete(inscription) => {
                     let og_inscription_id = InscriptionId {
-                        txid: Txid::from_slice(
-                            &txs.first().anyhow_as("Partial txs vec is empty")?.txid(),
-                        )
-                        .anyhow()?,
+                        txid: Txid::from_slice(&txs[0].txid()).anyhow()?,
                         index: 0,
                     };
 
@@ -221,18 +207,15 @@ impl<'a> InscriptionUpdater<'a> {
                         vout: og_inscription_id.index,
                     };
 
-                    let owner = tx
-                        .output
-                        .first()
-                        .and_then(|x| {
-                            x.script_pubkey
-                                .to_address_str(crate::chain::Network::Bellscoin)
-                        })
+                    let owner = tx.output[0]
+                        .script_pubkey
+                        .to_address_str(crate::chain::Network::Bellscoin)
                         .anyhow_as("No owner :(")?;
 
                     let inscription_number: u64 = self
-                        .temp_db
-                        .remove(&LastInscriptionNumber::get_db_key())
+                        .store
+                        .temp_db()
+                        .remove(&&LastInscriptionNumber::get_temp_db_key(block_height))
                         .map(|x| u64::from_be_bytes(x.try_into().expect("Failed to convert")))
                         .unwrap_or(0);
 
@@ -246,10 +229,7 @@ impl<'a> InscriptionUpdater<'a> {
                         },
                     );
 
-                    let new_inc_n = LastInscriptionNumber {
-                        height: block_height,
-                        number: inscription_number + 1,
-                    };
+                    let new_inc_n = LastInscriptionNumber::new(inscription_number + 1);
 
                     let inscription_extra = InscriptionExtraData::new(
                         location,
@@ -262,7 +242,7 @@ impl<'a> InscriptionUpdater<'a> {
                         0,
                     );
 
-                    self.inscription_db.write(
+                    self.store.inscription_db().write(
                         vec![
                             new_row.into_row(),
                             inscription_extra.to_db_row()?,
@@ -271,9 +251,9 @@ impl<'a> InscriptionUpdater<'a> {
                         super::db::DBFlush::Disable,
                     );
 
-                    self.temp_db.remove(&partial_key);
-                    self.temp_db.write(
-                        vec![new_inc_n.to_temp_db_row()?],
+                    self.store.temp_db().remove(&partial_key);
+                    self.store.temp_db().write(
+                        vec![new_inc_n.to_temp_db_row(block_height)?],
                         super::db::DBFlush::Disable,
                     );
                 }
@@ -283,12 +263,23 @@ impl<'a> InscriptionUpdater<'a> {
         Ok(0)
     }
 
-    pub fn copy_from_main_block(&self, next_block_height: u32) -> anyhow::Result<()> {
+    pub fn copy_from_main_block(&self, current_block_height: u32) -> anyhow::Result<()> {
+        let next_block_height = current_block_height + 1;
+
+        if let Some(_) = self
+            .store
+            .temp_db()
+            .get(&LastInscriptionNumber::get_temp_db_key(next_block_height))
+        {
+            return Ok(());
+        }
+
         let mut to_write = vec![];
 
         for i in self
-            .inscription_db
-            .iter_scan(PARTIAL_TXID_TO_TXIDS.as_bytes())
+            .store
+            .inscription_db()
+            .iter_scan(&bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS))?)
         {
             let mut x = PartialTxs::from_db(i)?;
             x.block_height = next_block_height;
@@ -304,26 +295,21 @@ impl<'a> InscriptionUpdater<'a> {
         //     to_write.push(x.to_temp_db_row(next_block_height, &owner)?);
         // }
 
-        let mut last_number = self
-            .inscription_db
+        let last_number = self
+            .store
+            .inscription_db()
             .get(&LastInscriptionNumber::get_db_key())
-            .map(|x| {
-                LastInscriptionNumber::from_db(DBRow {
-                    key: vec![],
-                    value: x,
-                })
-            })
-            .unwrap_or(Ok(LastInscriptionNumber {
-                height: 0,
-                number: 0,
-            }))
+            .map(LastInscriptionNumber::from_raw)
+            .unwrap()
             .anyhow_as("Failed to decode last inscription number")?;
 
-        last_number.height = next_block_height;
+        to_write.push(last_number.to_temp_db_row(next_block_height)?);
 
-        to_write.push(last_number.to_temp_db_row()?);
+        warn!("Copied {} entries from main block", to_write.len());
 
-        self.temp_db.write(to_write, super::db::DBFlush::Disable);
+        self.store
+            .temp_db()
+            .write(to_write, super::db::DBFlush::Disable);
 
         Ok(())
     }
@@ -335,7 +321,8 @@ impl<'a> InscriptionUpdater<'a> {
 
         let last_inscription_number_key = LastInscriptionNumber::get_temp_db_key(min_height);
         let last_number = self
-            .temp_db
+            .store
+            .temp_db()
             .get(&last_inscription_number_key)
             .map(|x| {
                 LastInscriptionNumber::from_db(DBRow {
@@ -352,7 +339,8 @@ impl<'a> InscriptionUpdater<'a> {
             let block_height = block.height() as u32;
 
             let keys = self
-                .tx_db
+                .store
+                .txstore_db()
                 .get(&BlockRow::txids_key(full_hash(&block.hash()[..])))
                 .map(|val| {
                     bincode_util::deserialize_little::<Vec<Txid>>(&val)
@@ -363,7 +351,8 @@ impl<'a> InscriptionUpdater<'a> {
                 .map(|x| TxRow::key(&x.into_inner()));
 
             let txs = self
-                .tx_db
+                .store
+                .txstore_db()
                 .db
                 .multi_get(keys)
                 .into_iter()
@@ -383,7 +372,8 @@ impl<'a> InscriptionUpdater<'a> {
 
             // Temp db flow
             {
-                self.temp_db
+                self.store
+                    .temp_db()
                     .iter_scan(&InscriptionExtraData::get_temp_db_iter_key(block_height))
                     .map(|x| {
                         (
@@ -394,7 +384,7 @@ impl<'a> InscriptionUpdater<'a> {
                     .for_each(|(key, (extra, _))| {
                         // Extra data to restore
                         {
-                            self.temp_db.db.delete(&key).unwrap();
+                            self.store.temp_db().db.delete(&key).unwrap();
                             to_restore.push(extra.to_db_row().unwrap());
                         }
 
@@ -406,7 +396,8 @@ impl<'a> InscriptionUpdater<'a> {
                                 block_height,
                             );
                             let (history_row, _) = self
-                                .temp_db
+                                .store
+                                .temp_db()
                                 .remove(&history_key)
                                 .map(|x| {
                                     OrdHistoryRow::from_temp_db_row(DBRow {
@@ -422,30 +413,34 @@ impl<'a> InscriptionUpdater<'a> {
             }
 
             for tx in txs.into_iter().rev() {
+                if tx.is_coin_base() {
+                    // TODO handle coinbase
+                    continue;
+                }
+
                 for (idx, output) in tx.output.iter().enumerate() {
                     let outpoint = OutPoint {
                         txid: tx.txid(),
                         vout: idx as u32,
                     };
+                    let owner = output
+                        .script_pubkey
+                        .to_address_str(crate::chain::Network::Bellscoin)
+                        .expect("Can't parse owner");
 
                     // Main db flow
                     {
-                        let owner = output
-                            .script_pubkey
-                            .to_address_str(crate::chain::Network::Bellscoin)
-                            .expect("Can't parse owner");
-
                         let extra_key = InscriptionExtraData::get_db_key(outpoint);
                         let history_key = OrdHistoryRow::create_db_key(owner, &outpoint);
 
-                        if let Some(_) = self.inscription_db.remove(&extra_key).map(|x| {
+                        if let Some(_) = self.store.inscription_db().remove(&extra_key).map(|x| {
                             InscriptionExtraData::from_raw(DBRow {
                                 key: extra_key,
                                 value: x,
                             })
                             .unwrap()
                         }) {
-                            self.inscription_db.db.delete(&history_key).unwrap();
+                            self.store.inscription_db().db.delete(&history_key).unwrap();
                         }
                     }
                 }
@@ -453,7 +448,8 @@ impl<'a> InscriptionUpdater<'a> {
         }
 
         if !to_restore.is_empty() {
-            self.inscription_db
+            self.store
+                .inscription_db()
                 .write(to_restore, super::db::DBFlush::Disable);
         }
 
@@ -464,7 +460,8 @@ impl<'a> InscriptionUpdater<'a> {
         let mut to_delete = vec![];
 
         for i in self
-            .temp_db
+            .store
+            .temp_db()
             .iter_scan(&PartialTxs::get_temp_iter_key(block_height))
         {
             to_delete.push(i.key);
@@ -479,7 +476,19 @@ impl<'a> InscriptionUpdater<'a> {
 
         to_delete.push(LastInscriptionNumber::get_temp_db_key(block_height));
 
-        self.temp_db.delete_batch(to_delete);
+        self.store.temp_db().delete_batch(to_delete);
+
+        let last_block_hash = *self
+            .store
+            .indexed_headers
+            .read()
+            .header_by_height(block_height as usize)
+            .unwrap()
+            .hash();
+
+        self.store
+            .inscription_db()
+            .put(b"ot", &last_block_hash.into_inner());
 
         Ok(())
     }
@@ -489,7 +498,8 @@ impl<'a> InscriptionUpdater<'a> {
         let mut to_write = vec![];
 
         for i in self
-            .temp_db
+            .store
+            .temp_db()
             .iter_scan(&PartialTxs::get_temp_iter_key(current_block_height))
         {
             let mut x = PartialTxs::from_temp_db(i)?;
@@ -497,15 +507,21 @@ impl<'a> InscriptionUpdater<'a> {
             to_write.push(x.to_temp_db_row()?);
         }
 
-        // for i in self
-        //     .temp_db
-        //     .iter_scan(&UserOrdStats::get_temp_iter_key(current_block_height))
-        // {
-        //     let (x, owner) = UserOrdStats::from_temp_db(i)?;
-        //     to_write.push(x.to_temp_db_row(next_block_height, &owner)?);
-        // }
+        let last_number = self
+            .store
+            .temp_db()
+            .get(&LastInscriptionNumber::get_temp_db_key(
+                current_block_height,
+            ))
+            .map(LastInscriptionNumber::from_raw)
+            .unwrap()
+            .anyhow_as("Failed to decode last inscription number")?;
 
-        self.temp_db.write(to_write, super::db::DBFlush::Disable);
+        to_write.push(last_number.to_temp_db_row(next_block_height)?);
+
+        self.store
+            .temp_db()
+            .write(to_write, super::db::DBFlush::Disable);
 
         Ok(())
     }
@@ -517,88 +533,31 @@ pub struct IndexHandler<'a> {
     pub inscription_number: u64,
 }
 impl<'a> IndexHandler<'a> {
-    fn get_owner(tx: &Transaction) -> anyhow::Result<String> {
-        return tx
-            .output
-            .first()
-            .and_then(|x| {
-                x.script_pubkey
-                    .to_address_str(crate::chain::Network::Bellscoin)
-            })
-            .anyhow_as("No owner 😭");
-    }
-
     pub fn try_parse_inscription(h: u32, txs: &[Transaction]) -> DigestedBlock {
         let mut partials: HashMap<Txid, Vec<(u32, usize, Transaction)>> = HashMap::new();
         let mut inscriptions = vec![];
         let mut rest = vec![];
+        let mut token_cache = TokenCache::default();
 
         for (i, tx) in txs.iter().enumerate() {
-            match Inscription::from_transactions(&[tx]) {
-                ParsedInscription::None => {
-                    if let Some(mut chain) = partials.remove(&tx.input[0].previous_output.txid) {
-                        chain.push((h, i, tx.clone()));
-                        match Inscription::from_transactions(
-                            &chain.iter().map(|x| &x.2).collect_vec(),
-                        ) {
-                            ParsedInscription::None => {
-                                chain.pop();
-                                partials.insert(chain.last().unwrap().2.txid(), chain);
-                            }
-                            ParsedInscription::Partial => {
-                                partials.insert(chain.last().unwrap().2.txid(), chain);
-                            }
-                            ParsedInscription::Complete(inscription) => {
-                                let inscription_template = InscriptionTemplate {
-                                    genesis: chain.first().unwrap().2.txid(),
-                                    location: tx.txid(),
-                                    content_type: inscription.content_type().unwrap().to_owned(),
-                                    content_len: inscription.content_length().unwrap(),
-                                    owner: Self::get_owner(tx).unwrap(),
-                                    inscription_number: 0,
-                                    height: h,
-                                    value: tx.output[0].value,
-                                    offset: 0,
-                                };
-                                inscriptions.push((i, inscription_template));
-                            }
-                        }
-                    } else {
-                        rest.push((h, i, tx.clone()));
-                    }
-                }
-                ParsedInscription::Partial => {
-                    partials.insert(tx.txid(), vec![(h, i, tx.clone())]);
-                }
-                ParsedInscription::Complete(inscription) => {
-                    let txid = tx.txid();
-                    let inscription_template = InscriptionTemplate {
-                        genesis: txid,
-                        location: txid,
-                        content_type: inscription.content_type().unwrap().to_owned(),
-                        content_len: inscription.content_length().unwrap(),
-                        owner: Self::get_owner(tx).unwrap(),
-                        inscription_number: 0,
-                        height: h,
-                        value: tx.output[0].value,
-                        offset: 0,
-                    };
-                    inscriptions.push((i, inscription_template));
-                }
+            if !Self::parse_inscriptions(tx, h, i, &mut partials, &mut inscriptions, &mut token_cache) {
+                rest.push((h, i, tx.clone()));
             }
         }
 
         DigestedBlock {
             height: h,
-            partial: partials,
-            completed: inscriptions,
+            partial_inscription: partials,
+            completed_inscription: inscriptions,
             rest,
+            token_cache,
         }
     }
 
     pub fn handle_blocks(
         &mut self,
         blocks: &Vec<(u32, Vec<Transaction>)>,
+        token_cache: &mut TokenCache,
     ) -> Vec<InscriptionTemplate> {
         let mut data = vec![];
         blocks
@@ -610,44 +569,21 @@ impl<'a> IndexHandler<'a> {
         let mut completed = vec![];
 
         for mut digested_block in data {
-            self.cached_partial.extend(digested_block.partial);
+            self.cached_partial.extend(digested_block.partial_inscription);
+            token_cache.extend(digested_block.token_cache);
 
-            for (h, i, tx) in digested_block.rest {
-                if let Some(mut chain) = self
-                    .cached_partial
-                    .remove(&tx.input[0].previous_output.txid)
-                {
-                    chain.push((h, i, tx.clone()));
-                    match Inscription::from_transactions(&chain.iter().map(|x| &x.2).collect_vec())
-                    {
-                        ParsedInscription::None => {
-                            chain.pop();
-                            self.cached_partial
-                                .insert(chain.last().unwrap().2.txid(), chain);
-                        }
-                        ParsedInscription::Partial => {
-                            self.cached_partial.insert(tx.txid(), chain);
-                        }
-                        ParsedInscription::Complete(inscription) => {
-                            let inscription_template = InscriptionTemplate {
-                                genesis: chain.first().unwrap().2.txid(),
-                                location: tx.txid(),
-                                content_type: inscription.content_type().unwrap().to_owned(),
-                                content_len: inscription.content_length().unwrap(),
-                                owner: Self::get_owner(&tx).unwrap(),
-                                inscription_number: 0,
-                                height: h,
-                                value: tx.output[0].value,
-                                offset: 0,
-                            };
-                            digested_block.completed.push((i, inscription_template));
-                        }
-                    }
-                }
+            for (height, index, tx) in digested_block.rest {
+                Self::parse_inscriptions(
+                    &tx,
+                    height,
+                    index,
+                    &mut self.cached_partial,
+                    &mut digested_block.completed_inscription,
+                    token_cache,
+                );
             }
 
-            digested_block.completed.sort_unstable_by_key(|x| x.0);
-            for (_, mut inc) in digested_block.completed {
+            for (_, mut inc) in digested_block.completed_inscription {
                 inc.inscription_number = self.inscription_number;
                 self.inscription_number += 1;
                 completed.push(inc);
@@ -657,18 +593,60 @@ impl<'a> IndexHandler<'a> {
         completed
     }
 
+    fn parse_inscriptions(
+        tx: &Transaction,
+        height: u32,
+        idx: usize,
+        cache: &mut HashMap<Txid, Vec<(u32, usize, Transaction)>>,
+        inscriptions: &mut Vec<(usize, InscriptionTemplate)>,
+        token_cache: &mut TokenCache,
+    ) -> bool {
+        let mut chain = cache
+            .remove(&tx.input[0].previous_output.txid)
+            .unwrap_or_default();
+
+        chain.push((height, idx, tx.clone()));
+
+        match Inscription::from_transactions(&chain.iter().map(|x| &x.2).collect_vec()) {
+            ParsedInscription::None => false,
+            ParsedInscription::Partial => {
+                cache.insert(tx.txid(), vec![(height, idx, tx.clone())]);
+                true
+            }
+            ParsedInscription::Complete(inscription) => {
+                let location = OutPoint {txid: tx.txid(), vout: 0};
+                let genesis = OutPoint { txid: chain.first().unwrap().2.txid(),vout: 0};
+                let content_type = inscription.content_type().unwrap().to_owned();
+                let content_len = inscription.content_length().unwrap();
+                let content = inscription.into_body().unwrap();
+                let owner = get_owner(tx, 0).unwrap();
+
+                token_cache.parse_token_action(&content_type, &content, height, idx, owner.clone(), genesis, location);
+
+                let inscription_template = InscriptionTemplate {
+                    genesis,
+                    location,
+                    content_type,
+                    content_len,
+                    owner,
+                    inscription_number: 0,
+                    height,
+                    value: tx.output[0].value,
+                    offset: 0,
+                };
+                inscriptions.push((idx, inscription_template));
+                true
+            }
+        }
+    }
+
     pub fn write_inscription(&self, data: Vec<InscriptionTemplate>) -> anyhow::Result<()> {
         let mut to_write = vec![];
 
         for inc in data {
-            let genesis = OutPoint {
-                txid: inc.genesis,
-                vout: 0,
-            };
-            let location = OutPoint {
-                txid: inc.location,
-                vout: 0,
-            };
+           
+            let genesis = inc.genesis;
+            let location = inc.location;
 
             let new_row = OrdHistoryRow::new(
                 inc.owner.clone(),
@@ -712,7 +690,7 @@ impl<'a> IndexHandler<'a> {
                 .iter()
                 .map(|(last_txid, txs)| {
                     PartialTxs {
-                        block_height: txs.first().unwrap().0,
+                        block_height: txs[0].0,
                         last_txid: *last_txid,
                         txs: txs.iter().map(|x| x.2.txid()).collect_vec(),
                     }
@@ -747,10 +725,7 @@ impl<'a> IndexHandler<'a> {
     }
 
     pub fn write_inscription_number(&self) -> anyhow::Result<()> {
-        let last_number = LastInscriptionNumber {
-            height: 0,
-            number: self.inscription_number,
-        };
+        let last_number = LastInscriptionNumber::new(self.inscription_number);
 
         self.store
             .inscription_db()
@@ -791,16 +766,10 @@ impl<'a> IndexHandler<'a> {
 }
 
 pub struct MoveIndexer<'a> {
-    pub inscription_db: &'a DB,
-    pub txstore_db: &'a DB,
+    pub store: &'a Store,
+    pub cached_transfer: HashMap<OutPoint, (String, TransferProto)>,
 }
 impl<'a> MoveIndexer<'a> {
-    pub fn get_address(script: &Script) -> String {
-        Address::from_script(script, bitcoin::network::constants::Network::Bitcoin)
-            .unwrap()
-            .to_string()
-    }
-
     pub fn load_inscription(&self, txs: &[Transaction]) -> Vec<(OutPoint, MovedInscription)> {
         let mut outpoints = vec![];
         for tx in txs {
@@ -811,7 +780,7 @@ impl<'a> MoveIndexer<'a> {
             );
         }
 
-        self.inscription_db
+        self.store.inscription_db()
             .db
             .multi_get(&outpoints)
             .into_iter()
@@ -838,28 +807,34 @@ impl<'a> MoveIndexer<'a> {
     }
 
     pub fn handle(
-        &self,
+        &mut self,
         blocks: &Vec<(u32, Vec<Transaction>)>,
+        token_cache: &mut TokenCache,
     ) -> HashMap<OutPoint, MovedInscription> {
         let mut temp = vec![];
-        blocks
-            .par_iter()
-            .map(|(_, txs)| (load_txos(self.txstore_db, txs), self.load_inscription(txs)))
-            .collect_into_vec(&mut temp);
-
+        measure_time! {"Load data for moves": {
+            blocks
+                .par_iter()
+                .map(|(_, txs)| (load_txos(self.store.txstore_db(), txs), self.load_inscription(txs)))
+                .collect_into_vec(&mut temp);
+        }};
+      
+    
         let mut txos = HashMap::new();
         let mut inscriptions: HashMap<OutPoint, MovedInscription> = HashMap::new();
-
+        
         for (txouts, inc) in temp {
             txos.extend(txouts);
             inscriptions.extend(inc);
         }
-
+        
         if inscriptions.is_empty() {
-            return HashMap::new();
+            return HashMap::default(); 
         }
+        
+        measure_time! {"Move parsing": {
 
-        for (_, txs) in blocks {
+        for (height, txs) in blocks {
             for tx in txs {
                 // todo coinbase be backe
                 if tx.is_coin_base() {
@@ -879,7 +854,7 @@ impl<'a> MoveIndexer<'a> {
                     continue;
                 }
 
-                let inputs_cum = InscriptionSearcher::calc_offsets(&tx, &txos);
+                let inputs_cum = InscriptionSearcher::calc_offsets(tx, &txos);
 
                 for (idx, mut inc) in found_inscriptions {
                     let Result::Ok((vout, offset)) = InscriptionSearcher::get_output_index_by_input(
@@ -889,25 +864,32 @@ impl<'a> MoveIndexer<'a> {
                             .map(|x| x + inc.data.value.offset),
                         &tx.output,
                     ) else {
+                        if inc.new_owner.is_none() {
+                            token_cache.try_transfered(*height, idx, inc.data.location, "leaked".to_owned());
+                        }
                         inc.leaked = true;
                         inscriptions.insert(inc.data.location, inc);
                         continue;
                     };
 
                     inc.data.value.offset = offset;
-
                     let location = OutPoint {
                         txid: tx.txid(),
                         vout,
                     };
 
-                    inc.new_owner =
-                        Some(Self::get_address(&tx.output[vout as usize].script_pubkey));
+                    let new_owner = get_owner(tx, vout as usize).unwrap();
+                    if inc.new_owner.is_none() {
+                        token_cache.try_transfered(*height, idx, inc.data.location, new_owner.clone());
+                    }
 
+                    inc.new_owner = Some(new_owner);
                     inscriptions.insert(location, inc);
                 }
             }
         }
+        
+        }};
 
         inscriptions
     }
@@ -916,73 +898,67 @@ impl<'a> MoveIndexer<'a> {
         let mut to_write = vec![];
 
         for (new_location, mut inc) in data {
+            if inc.new_owner.is_none() && !inc.leaked {
+                assert_eq!(inc.data.location, new_location); 
+                continue;
+            }
+            
+            let old_location = inc.data.location;
+            let old_owner = inc.data.value.owner.clone();
+
+            inc.data.location = new_location;
             if inc.leaked {
-                let old_location = inc.data.location;
-                let old_owner = inc.data.value.owner;
-
                 inc.data.value.owner = "leaked 😭".to_owned();
+            }
 
-                self.inscription_db
+            let prev_history_value = {
+                self.store.inscription_db()
                     .db
                     .delete(&InscriptionExtraData::get_db_key(old_location))?;
-                self.inscription_db
+                self.store.inscription_db()
                     .remove(&OrdHistoryRow::create_db_key(
                         old_owner.clone(),
                         &old_location,
                     ))
                     .map(|x| OrdHistoryRow::value_from_raw(&x))
-                    .anyhow_as("Failed to find OrdHistoryRow")?;
+                    .anyhow_as("Failed to find OrdHistoryRow")?
+            };
 
-                to_write.push(inc.data.to_db_row()?);
-                continue;
-            }
             if let Some(new_owner) = inc.new_owner {
-                let old_location = inc.data.location;
-                let old_owner = inc.data.value.owner;
-
                 inc.data.value.owner = new_owner.clone();
-                inc.data.location = new_location;
 
-                // Work with old user
-                let prev_history_value = {
-                    self.inscription_db
-                        .db
-                        .delete(&InscriptionExtraData::get_db_key(old_location))?;
-                    self.inscription_db
-                        .remove(&OrdHistoryRow::create_db_key(
-                            old_owner.clone(),
-                            &old_location,
-                        ))
-                        .map(|x| OrdHistoryRow::value_from_raw(&x))
-                        .anyhow_as("Failed to find OrdHistoryRow")?
-                };
-
-                // Work with new user
                 let new_ord_history =
-                    OrdHistoryRow::new(new_owner.clone(), new_location, prev_history_value);
+                    OrdHistoryRow::new(new_owner, new_location, prev_history_value);
 
                 to_write.push(new_ord_history.into_row());
-                to_write.push(inc.data.to_db_row()?);
             }
+
+            to_write.push(inc.data.to_db_row()?);
         }
 
-        self.inscription_db
+        self.store.inscription_db()
             .write(to_write, super::db::DBFlush::Disable);
 
         Ok(())
     }
+
 }
 
 pub struct DigestedBlock {
     pub height: u32,
-    pub partial: HashMap<Txid, Vec<(u32, usize, Transaction)>>,
-    pub completed: Vec<(usize, InscriptionTemplate)>,
+    pub partial_inscription: HashMap<Txid, Vec<(u32, usize, Transaction)>>,
+    pub completed_inscription: Vec<(usize, InscriptionTemplate)>,
     pub rest: Vec<(u32, usize, Transaction)>,
+    pub token_cache: TokenCache,
 }
-
+#[derive(Default)]
+pub struct DigestedMoves {
+    pub inscriptions: HashMap<OutPoint, MovedInscription>,
+    pub tokens_data: TokensData
+}
 pub struct InscriptionTemplate {
-    pub genesis: Txid,
-    pub location: Txid,
+    pub genesis: OutPoint,
+    pub location: OutPoint,
     pub content_type: String,
     pub owner: String,
     pub content_len: usize,
@@ -1032,7 +1008,7 @@ impl InscriptionSearcher {
 
     fn get_output_index_by_input(
         offset: Option<u64>,
-        tx_outs: &Vec<TxOut>,
+        tx_outs: &[TxOut],
     ) -> anyhow::Result<(u32, u64)> {
         let Some(mut offset) = offset else {
             anyhow::bail!("leaked");
@@ -1050,24 +1026,21 @@ impl InscriptionSearcher {
 }
 
 pub fn load_txos(tx_db: &DB, txs: &[Transaction]) -> HashMap<OutPoint, u64> {
-    txs.iter()
+    let keys_iter = txs
+        .iter()
         .filter(|x| !x.is_coin_base())
-        .flat_map(|tx| {
-            let keys = tx.input.iter().map(|x| x.previous_output).collect_vec();
+        .flat_map(|tx| tx.input.iter().map(|x| x.previous_output));
+    let keys = keys_iter.clone().map(|x| TxOutRow::key(&x)).collect_vec();
 
-            tx_db
-                .db
-                .multi_get(keys.iter().map(|x| TxOutRow::key(&x)).collect_vec())
-                .iter()
-                .flatten()
-                .flatten()
-                .map(|x| {
-                    bitcoin::consensus::deserialize::<TxOut>(&x).expect("failed to parse TxOut")
-                })
-                .zip(keys.iter())
-                .map(|x| (x.1.clone(), x.0.value))
-                .collect_vec()
-        })
+    tx_db
+        .db
+        .multi_get(keys)
+        .iter()
+        .flatten()
+        .flatten()
+        .map(|x| bitcoin::consensus::deserialize::<TxOut>(&x).expect("failed to parse TxOut"))
+        .zip(keys_iter)
+        .map(|x| (x.1.clone(), x.0.value))
         .collect()
 }
 
@@ -1079,4 +1052,10 @@ macro_rules! measure_time {
         tracing::warn!("{}: {:.3} s", $n, time.elapsed().as_secs_f32());
         a
     }};
+}
+
+fn get_owner(tx: &Transaction, idx: usize) -> Option<String> {
+    tx.output[idx]
+        .script_pubkey
+        .to_address_str(crate::chain::Network::Bellscoin)
 }

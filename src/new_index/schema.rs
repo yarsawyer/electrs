@@ -13,19 +13,21 @@ use crate::chain::{
 };
 use crate::config::Config;
 use crate::daemon::Daemon;
-use crate::errors::*;
 use crate::inscription_entries::inscription::{
-    InscriptionExtraData, InscriptionExtraDataValue, OrdHistoryRow, UserOrdStats,
+    InscriptionExtraData, InscriptionExtraDataValue, LastInscriptionNumber, OrdHistoryRow,
+    PartialTxs, UserOrdStats,
 };
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::new_index::inscriptions_updater::{IndexHandler, MoveIndexer};
 use crate::new_index::progress::Progress;
+use crate::new_index::token::TokenCache;
 use crate::rest::{InscriptionMeta, UtxoValue};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
     BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
 };
+use crate::{errors::*, measure_time};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 use std::path::Path;
@@ -50,6 +52,7 @@ pub struct Store {
     // TODO: should be column families
     txstore_db: DB,
     temp_db: DB,
+    token_db: DB,
     history_db: DB,
     cache_db: DB,
     inscription_db: DB,
@@ -63,6 +66,7 @@ impl Store {
     pub fn open(path: &Path, config: &Config) -> Self {
         let txstore_db = DB::open(&path.join("txstore"), config);
         let temp_db = DB::open(&path.join("temp"), config);
+        let token_db = DB::open(&path.join("token"), config);
         let added_blockhashes = load_blockhashes(&txstore_db, &BlockRow::done_filter());
         debug!("{} blocks were added", added_blockhashes.len());
 
@@ -90,6 +94,7 @@ impl Store {
         Store {
             txstore_db,
             temp_db,
+            token_db,
             history_db,
             cache_db,
             inscription_db,
@@ -102,6 +107,10 @@ impl Store {
 
     pub fn txstore_db(&self) -> &DB {
         &self.txstore_db
+    }
+
+    pub fn token_db(&self) -> &DB {
+        &self.token_db
     }
 
     pub fn temp_db(&self) -> &DB {
@@ -217,8 +226,10 @@ impl From<&Config> for IndexerConfig {
     }
 }
 
+#[derive(Debug)]
 pub enum InscriptionParseBlock {
-    FromHeight(u32),
+    FromHeight(u32, u32),
+    FromToHeight(u32, u32),
     ToHeight(u32),
     AtHeight(u32),
 }
@@ -247,6 +258,86 @@ impl Indexer {
         }
     }
 
+    pub fn clear_temp(&self, block_height: u32) -> Option<u32> {
+        let last_indexed_block: Option<BlockHash> = self
+            .store
+            .inscription_db()
+            .get(b"ot")
+            .map(|x| BlockHash::from_slice(&x).unwrap());
+
+        let last_number = last_indexed_block
+            .map(|x| self.get_block_height(x))
+            .flatten();
+
+        if let None = last_number {
+            return None;
+        }
+
+        let last_number = last_number.unwrap() as u32;
+
+        let mut to_delete = vec![];
+        let block_d = block_height - last_number;
+        let remove_blocks_to = block_height - 1;
+
+        for i in self.store.temp_db().iter_scan_reverse(
+            &PartialTxs::get_temp_iter_key(0),
+            &PartialTxs::get_temp_iter_key(remove_blocks_to),
+        ) {
+            warn!("Deleting partrial");
+            to_delete.push(i.key);
+        }
+
+        for i in self.store.temp_db().iter_scan_reverse(
+            &LastInscriptionNumber::get_temp_db_key(0),
+            &LastInscriptionNumber::get_temp_db_key(remove_blocks_to),
+        ) {
+            warn!("Deleting last inscription number");
+            to_delete.push(i.key);
+        }
+
+        // Clear InscriptioExtraData
+        for i in self.store.temp_db().iter_scan_reverse(
+            &InscriptionExtraData::get_temp_db_iter_key(0),
+            &InscriptionExtraData::get_temp_db_iter_key(remove_blocks_to),
+        ) {
+            warn!("Deleting inscription extra");
+            to_delete.push(i.key);
+        }
+
+        // Clear OrdHistoryRow
+        for i in self.store.temp_db().iter_scan(&[OrdHistoryRow::CODE]) {
+            let key = i.key.clone();
+            let row = OrdHistoryRow::from_temp_db_row(i).unwrap();
+            if row.1 <= remove_blocks_to {
+                warn!("Deleting OrdHistoryRow");
+                warn!("OrdHistoryRow height is {}", row.1);
+                to_delete.push(key);
+            }
+        }
+
+        warn!("To clear: {}", to_delete.len());
+        warn!("block_d: {}", block_d);
+
+        if to_delete.is_empty() {
+            return Some(last_number);
+        }
+
+        self.store.temp_db().delete_batch(to_delete);
+
+        // let ot_hash = self
+        //     .store
+        //     .indexed_headers
+        //     .read()
+        //     .header_by_height((last_number + block_d) as usize)
+        //     .unwrap()
+        //     .hash()
+        //     .clone();
+
+        // self.store.inscription_db.put(b"ot", &ot_hash.into_inner());
+
+        Some(last_number)
+    }
+
     fn start_timer(&self, name: &str) -> HistogramTimer {
         self.duration.with_label_values(&[name]).start_timer()
     }
@@ -263,15 +354,30 @@ impl Indexer {
         &self,
         block: &InscriptionParseBlock,
     ) -> anyhow::Result<Vec<BlockHash>> {
-        let blocks = match block {
-            InscriptionParseBlock::FromHeight(height) => self
+        let blocks = match *block {
+            InscriptionParseBlock::FromHeight(height, limit) => self
                 .store
                 .indexed_headers
                 .read()
                 .iter()
-                .skip(*height as usize)
+                .skip(height as usize)
+                .take(limit as usize)
                 .map(|x| *x.hash())
                 .collect_vec(),
+            InscriptionParseBlock::FromToHeight(from, to) => {
+                if from == to {
+                    return Ok(vec![]);
+                }
+
+                self.store
+                    .indexed_headers
+                    .read()
+                    .iter()
+                    .skip(from as usize)
+                    .take_while(|x| x.height() <= to as usize)
+                    .map(|x| *x.hash())
+                    .collect_vec()
+            }
             InscriptionParseBlock::ToHeight(height) => {
                 let last_indexed_block: Option<BlockHash> = self
                     .store
@@ -287,10 +393,14 @@ impl Indexer {
                 // ! FOR TESTS
                 // let last_number = 22489;
 
+                if last_number == height as usize {
+                    return Ok(vec![]);
+                }
+
                 self.store
                     .indexed_headers
                     .read()
-                    .header_by_range(last_number, *height as usize)
+                    .header_by_range(last_number, height as usize)
                     .map(|x| *x.hash())
                     .collect()
             }
@@ -298,7 +408,7 @@ impl Indexer {
                 .store
                 .indexed_headers
                 .read()
-                .header_by_height(*height as usize)
+                .header_by_height(height as usize)
                 .unwrap()
                 .hash()],
         };
@@ -310,14 +420,10 @@ impl Indexer {
         chain: Arc<ChainQuery>,
         block: InscriptionParseBlock,
     ) -> anyhow::Result<()> {
-        let inscription_updater = InscriptionUpdater::new(
-            self.store.inscription_db(),
-            self.store.txstore_db(),
-            self.store.temp_db(),
-        )
-        .anyhow()?;
-
+        let inscription_updater = InscriptionUpdater::new(self.store.clone()).anyhow()?;
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
+
+        warn!("Blocks to temp index: {}", blocks.len());
 
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
@@ -329,19 +435,16 @@ impl Indexer {
             let txos = load_txos(&self.store.txstore_db, &txs);
 
             for tx in txs {
-                inscription_updater
-                    .index_transaction_inscriptions(tx, block_number as u32, &txos)
-                    .unwrap();
+                inscription_updater.index_transaction_inscriptions(
+                    tx,
+                    block_number as u32,
+                    &txos,
+                )?;
             }
 
-            match block {
-                InscriptionParseBlock::AtHeight(_) => {
-                    inscription_updater
-                        .copy_to_next_block(block_number as u32)
-                        .anyhow()?;
-                }
-                _ => {}
-            }
+            inscription_updater
+                .copy_to_next_block(block_number as u32)
+                .anyhow()?;
         }
 
         Ok(())
@@ -349,10 +452,11 @@ impl Indexer {
 
     pub fn index_inscription(&self, block: InscriptionParseBlock) -> anyhow::Result<()> {
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
-        drop(block);
 
-        const CHUNK_SIZE: usize = 1000;
-        let last_block_hash = blocks.last().unwrap().clone();
+        const CHUNK_SIZE: usize = 3000;
+        let Some(last_block_hash) = blocks.last().cloned() else {
+            return Ok(());
+        };
 
         let mut indexer = IndexHandler {
             store: &self.store,
@@ -360,41 +464,56 @@ impl Indexer {
             inscription_number: 0,
         };
 
-        let move_indexer = MoveIndexer {
-            inscription_db: &self.store.inscription_db,
-            txstore_db: &self.store.txstore_db,
+        let mut move_indexer = MoveIndexer {
+            store: &self.store,
+            cached_transfer: HashMap::new(),
         };
+
+        let mut token_cache = TokenCache::default();
 
         let progress = Progress::begin("Indexing inscriptions blocks", blocks.len() as u64, 0);
 
         {
             for blocks_chunk in blocks.into_iter().chunks(CHUNK_SIZE).into_iter() {
-                let chunked = indexer.load_blocks_chunks(blocks_chunk.collect_vec());
+                let chunked = measure_time! {"Load blocks txs": {indexer.load_blocks_chunks(blocks_chunk.collect_vec())}};
 
                 // Handle inscriptions in blocks
-                {
-                    let completed = indexer.handle_blocks(&chunked);
-                    indexer.write_inscription(completed).unwrap();
-                }
+                let inscriptions = measure_time! {"Seek inc": {indexer.handle_blocks(&chunked, &mut token_cache)}};
+                measure_time! {"Write inc": {indexer.write_inscription(inscriptions).unwrap()}};
 
                 // Handle moves in blocks
-                {
-                    let moved = move_indexer.handle(&chunked);
-                    move_indexer.write_moves(moved).unwrap();
-                }
+                let moves = measure_time! {"Seek moves/ hndl tokens": {move_indexer.handle(&chunked, &mut token_cache)}};
+                measure_time! {"Write moves": {move_indexer.write_moves(moves).unwrap()}};
+                
+                warn!("Token actions {}", token_cache.token_actions.len());
+                warn!("Token all tx {}", token_cache.all_transfers.len());
+                warn!("Token valid tx {}", token_cache.valid_transfers.len());
+                measure_time! {"Load tokens data": token_cache.load_tokens_data(self.store.token_db())};
+                // sort by height and tx idx
+                measure_time! {"Sort token action": 
+                token_cache.token_actions.sort_unstable_by(|a,b|{
+                    a.0.cmp(&b.0).then(a.1.cmp(&b.1))
+                })
+                };
+                measure_time! {"Do token action": {token_cache.do_token_action()}};
+                measure_time! {"Write tokens data": {token_cache.write_token_data(self.store.token_db())}};
 
                 progress.inc(CHUNK_SIZE as u64)
             }
         }
 
+        drop(progress);
+
         indexer.write_patrials().unwrap();
         indexer.write_inscription_number().unwrap();
+        token_cache.write_valid_transfers(self.store.token_db());
 
         self.store
             .inscription_db
             .put(b"ot", &last_block_hash.into_inner());
 
         self.start_auto_compactions(&self.store.inscription_db);
+        self.start_auto_compactions(&self.store.token_db);
 
         Ok(())
     }
@@ -698,10 +817,9 @@ impl ChainQuery {
         scripthash: &[u8],
         last_seen_txid: Option<&Txid>,
         limit: usize,
-        address_str: String,
     ) -> Result<Vec<(Transaction, BlockId)>> {
         // scripthash lookup
-        self._history(b'H', scripthash, last_seen_txid, limit, address_str)
+        self._history(b'H', scripthash, last_seen_txid, limit)
     }
 
     pub fn history_txids_iter<'a>(&'a self, scripthash: &[u8]) -> impl Iterator<Item = Txid> + 'a {
@@ -716,7 +834,6 @@ impl ChainQuery {
         hash: &[u8],
         last_seen_txid: Option<&Txid>,
         limit: usize,
-        address_str: String,
     ) -> Result<Vec<(Transaction, BlockId)>> {
         let _timer_scan = self.start_timer("history");
         let txs_conf = self
@@ -883,10 +1000,10 @@ impl ChainQuery {
             };
 
             // abort if the utxo set size excedees the limit at any point in time
-            if utxos.len() > limit {
-                // bail!(ErrorKind::TooPopular)
-                break;
-            }
+            // if utxos.len() > limit {
+            //     // bail!(ErrorKind::TooPopular)
+            //     break;
+            // }
         }
 
         Ok((utxos, lastblock, processed_items))
@@ -902,7 +1019,7 @@ impl ChainQuery {
             .anyhow()?
             .unwrap_or_else(|| {
                 let inscriptions: Vec<UtxoValue> = self
-                    .ords(address.clone(), &OrdsSearcher::New(10000, None))
+                    .ords(address.clone(), &OrdsSearcher::New(usize::MAX, None))
                     .into_iter()
                     .flat_map(|x| x.into_iter().map(UtxoValue::from))
                     .collect();

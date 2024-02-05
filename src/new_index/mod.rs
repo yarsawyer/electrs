@@ -7,6 +7,7 @@ pub mod precache;
 mod progress;
 mod query;
 pub mod schema;
+pub mod token;
 
 pub use self::db::{DBRow, DB};
 

@@ -8,9 +8,9 @@ extern crate tracing;
 extern crate electrs;
 
 use error_chain::ChainedError;
+use std::process;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{process, time::Instant};
 
 use electrs::{
     config::Config,
@@ -78,26 +78,37 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &metrics,
     ));
 
-    let block_offset = tip_height - HEIGHT_DELAY;
+    let block_offset = tip_height - HEIGHT_DELAY - 1;
+
+    let ot = indexer.clear_temp(block_offset);
+
+    let temp_offset = if let Some(ot) = ot {
+        ot + HEIGHT_DELAY
+    } else {
+        block_offset
+    };
 
     indexer
-        .index_inscription(InscriptionParseBlock::ToHeight(block_offset))
+        .index_inscription(InscriptionParseBlock::FromToHeight(
+            ot.unwrap_or(config.first_inscription_block as u32),
+            block_offset,
+        ))
         .unwrap();
 
-    let inscription_updater =
-        InscriptionUpdater::new(store.inscription_db(), store.txstore_db(), store.temp_db())
-            .unwrap();
+    let inscription_updater = InscriptionUpdater::new(store.clone()).unwrap();
 
     inscription_updater
-        .copy_from_main_block(block_offset + 1)
+        .copy_from_main_block(block_offset)
         .unwrap();
 
     indexer
         .index_temp(
             chain.clone(),
-            InscriptionParseBlock::FromHeight(block_offset + 1),
+            InscriptionParseBlock::FromHeight(temp_offset + 1, HEIGHT_DELAY),
         )
         .unwrap();
+
+    store.inscription_db().flush();
 
     let mempool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         Arc::clone(&chain),
@@ -176,7 +187,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
                     .expect("Something went wrong with removing blocks");
             } else {
                 inscription_updater
-                    .remove_temp_data_orhpan(block - HEIGHT_DELAY)
+                    .remove_temp_data_orhpan(block - HEIGHT_DELAY - 1)
                     .unwrap();
             }
 

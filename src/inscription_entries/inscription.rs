@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
 use anyhow::Ok;
-use bitcoin::{hashes::Hash, OutPoint, Txid};
+use bitcoin::{blockdata::block, hashes::Hash, OutPoint, Txid};
 use itertools::Itertools;
 
 use crate::{
@@ -364,7 +364,13 @@ impl InscriptionExtraData {
     }
 
     pub fn get_temp_db_key(block_height: u32, location: &OutPoint) -> Vec<u8> {
-        bincode_util::serialize_big(&(OUTPOINT_IS_INSCRIPTION, block_height, location)).unwrap()
+        bincode_util::serialize_big(&(
+            OUTPOINT_IS_INSCRIPTION,
+            block_height,
+            location.txid.into_inner(),
+            location.vout,
+        ))
+        .unwrap()
     }
 
     pub fn get_temp_db_iter_key(block_height: u32) -> Vec<u8> {
@@ -372,8 +378,17 @@ impl InscriptionExtraData {
     }
 
     pub fn from_temp_db(row: DBRow) -> anyhow::Result<(Self, u32)> {
-        let (_, block_height, location): ([u8; OUTPOINT_IS_INSCRIPTION.len()], u32, OutPoint) =
-            bincode_util::deserialize_big(&row.key).anyhow_as(Self::ERROR_MESSAGE)?;
+        let (_, block_height, txid_raw, vout): (
+            [u8; OUTPOINT_IS_INSCRIPTION.len()],
+            u32,
+            [u8; 32],
+            u32,
+        ) = bincode_util::deserialize_big(&row.key).anyhow_as(Self::ERROR_MESSAGE)?;
+
+        let location = OutPoint {
+            txid: Txid::from_slice(&txid_raw).anyhow_as(Self::ERROR_MESSAGE)?,
+            vout,
+        };
 
         let extra_data: InscriptionExtraDataValue =
             bincode_util::deserialize_big(&row.value).anyhow_as(Self::ERROR_MESSAGE)?;
@@ -412,7 +427,9 @@ pub struct PartialTxs {
 
 impl PartialTxs {
     pub fn from_db(value: DBRow) -> anyhow::Result<Self> {
-        let txid = Txid::from_slice(&value.key[4..])?;
+        let (_, txid): (String, [u8; 32]) = bincode_util::deserialize_big(&value.key)
+            .anyhow_as("Failed to decode partial txs key")?;
+        let txid = Txid::from_slice(&txid)?;
 
         let txs: Vec<Txid> = value
             .value
@@ -441,7 +458,7 @@ impl PartialTxs {
     }
 
     pub fn get_db_key(&self) -> Vec<u8> {
-        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, self.last_txid)).unwrap()
+        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, self.last_txid.into_inner())).unwrap()
     }
 
     pub fn get_temp_iter_key(block_height: u32) -> Vec<u8> {
@@ -449,7 +466,8 @@ impl PartialTxs {
     }
 
     pub fn get_temp_db_key(block_height: u32, txid: &Txid) -> Vec<u8> {
-        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, block_height, txid)).unwrap()
+        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, block_height, txid.into_inner()))
+            .unwrap()
     }
 
     pub fn to_temp_db_row(&self) -> anyhow::Result<DBRow> {
@@ -465,16 +483,11 @@ impl PartialTxs {
     }
 
     pub fn from_temp_db(row: DBRow) -> anyhow::Result<Self> {
-        let partial_len = PARTIAL_TXID_TO_TXIDS.len();
+        let (_, block_height, txid): (String, u32, [u8; 32]) =
+            bincode_util::deserialize_big(&row.key)
+                .anyhow_as("Failed to decode partial txs key")?;
 
-        let block_height = u32::from_be_bytes(
-            row.key[partial_len..partial_len + 4]
-                .try_into()
-                .anyhow_as("Failed to decode block height")?,
-        );
-
-        let last_txid = Txid::from_slice(&row.key[partial_len + 4..])
-            .anyhow_as("Failed to decode last_txid")?;
+        let last_txid = Txid::from_slice(&txid).anyhow_as("Failed to decode last_txid")?;
 
         let txs: Vec<Txid> = row
             .value
@@ -795,20 +808,22 @@ impl InscriptionParser {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LastInscriptionNumber {
     pub number: u64,
-    pub height: u32,
 }
 
 impl LastInscriptionNumber {
-    const PREFIX: u8 = b'L';
-    pub fn new(number: u64, height: u32) -> Self {
-        Self { number, height }
+    pub fn new(number: u64) -> Self {
+        Self { number }
     }
 
     pub fn from_db(value: DBRow) -> anyhow::Result<Self> {
-        let number: u64 = bincode_util::deserialize_big(&value.value)
+        Self::from_raw(value.value)
+    }
+
+    pub fn from_raw(value: Vec<u8>) -> anyhow::Result<Self> {
+        let number: u64 = bincode_util::deserialize_big(&value)
             .anyhow_as("Cannot deserialize LastInscriptionNumber")?;
 
-        Ok(Self { number, height: 0 })
+        Ok(Self { number })
     }
 
     pub fn to_db(&self) -> anyhow::Result<DBRow> {
@@ -829,9 +844,9 @@ impl LastInscriptionNumber {
         bincode_util::serialize_big(&(INSCRIPTION_NUMBER, block_height)).unwrap()
     }
 
-    pub fn to_temp_db_row(&self) -> anyhow::Result<DBRow> {
+    pub fn to_temp_db_row(&self, block_height: u32) -> anyhow::Result<DBRow> {
         Ok(DBRow {
-            key: Self::get_temp_db_key(self.height),
+            key: Self::get_temp_db_key(block_height),
             value: self.to_db()?.value,
         })
     }

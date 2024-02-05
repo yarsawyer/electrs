@@ -32,9 +32,15 @@ macro_rules! define_prefix {
     };
 }
 
+// Inscription DB
 define_prefix! { PARTIAL_TXID_TO_TXIDS, A }
 define_prefix! { INSCRIPTION_NUMBER, B }
 define_prefix! { OUTPOINT_IS_INSCRIPTION, C }
 define_prefix! { ADDRESS_TO_ORD_STATS, D }
 define_prefix! { OWNER_LOCATION_TO_INSCRIPTION, E }
 // define_prefix! { INSCRIPTION_ID_LOCATION_TO_OWNER, F }
+
+// Token DB
+define_prefix! { TOKEN_TO_DATA, A }
+define_prefix! { ADDRESS_TOKEN_TO_AMOUNT, B }
+define_prefix! { ADDRESS_TICK_LOCATION_TO_TRANSFER, C }
