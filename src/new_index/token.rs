@@ -2,6 +2,7 @@ use super::DB;
 use crate::inscription_entries::index::{
     ADDRESS_TICK_LOCATION_TO_TRANSFER, ADDRESS_TOKEN_TO_AMOUNT, TOKEN_TO_DATA,
 };
+use crate::inscription_entries::InscriptionId;
 use crate::new_index::DBRow;
 use crate::util::bincode_util;
 use bitcoin::hashes::Hash;
@@ -13,7 +14,7 @@ use serde_with::serde_as;
 use serde_with::DisplayFromStr;
 use std::collections::{HashMap, HashSet};
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "op")]
 #[serde(rename_all = "lowercase")]
 pub enum BRC {
@@ -31,7 +32,7 @@ pub enum BRC {
     },
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "p")]
 #[serde_as]
 pub enum MintProto {
@@ -42,7 +43,7 @@ pub enum MintProto {
         amt: u64,
     },
 }
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "p")]
 #[serde_as]
 pub enum DeployProto {
@@ -73,7 +74,7 @@ impl DeployProto {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "p")]
 #[serde_as]
 pub enum TransferProto {
@@ -85,21 +86,34 @@ pub enum TransferProto {
     },
 }
 
-#[derive(Default)]
+#[serde_as]
+#[derive(Default, Serialize, Deserialize)]
 pub struct TokenCache {
     // All tokens. Used to check if a transfer is valid. Used like a cache, loaded from db before parsing.
+    #[serde(
+        with = ":: serde_with :: As :: < Vec < (:: serde_with :: Same , :: serde_with :: Same) > >"
+    )]
     pub tokens: HashMap<TokenKey, TokenValue>,
 
     // All token accounts. Used to check if a transfer is valid. Used like a cache, loaded from db before parsing.
+    #[serde(
+        with = ":: serde_with :: As :: < Vec < (:: serde_with :: Same , :: serde_with :: Same) > >"
+    )]
     pub token_accounts: HashMap<TokenAccountKey, TokenAccountValue>,
 
     // All token actions that not validated yet but just parsed. First u32 is height, second usize is index of transaction in block.
     pub token_actions: Vec<(u32, usize, TokenAction)>,
 
     // All transfer actions. Used to check if a transfer is valid. Used like cache.
+    #[serde(
+        with = ":: serde_with :: As :: < Vec < (:: serde_with :: Same , :: serde_with :: Same) > >"
+    )]
     pub all_transfers: HashMap<OutPoint, TransferProto>,
 
     // All transfer actions that are valid. Used to write to the db.
+    #[serde(
+        with = ":: serde_with :: As :: < Vec < (:: serde_with :: Same , :: serde_with :: Same) > >"
+    )]
     pub valid_transfers: HashMap<OutPoint, (String, TransferProto)>,
 }
 impl TokenCache {
@@ -431,7 +445,7 @@ impl TokenCache {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum TokenAction {
     // Deploy new token action.
     Deploy {
@@ -457,6 +471,7 @@ pub enum TokenAction {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
+
 pub struct TokenKey {
     pub tick: String,
 }
@@ -599,4 +614,5 @@ pub struct TokenBalance {
     pub tick: String,
     pub balance: u64,
     pub transferable_balance: u64,
+    pub transfers: Vec<(InscriptionId, u64)>,
 }

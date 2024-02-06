@@ -18,6 +18,7 @@ use crate::inscription_entries::inscription::{
     InscriptionExtraData, InscriptionExtraDataValue, LastInscriptionNumber, OrdHistoryRow,
     PartialTxs, UserOrdStats,
 };
+use crate::inscription_entries::InscriptionId;
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::new_index::inscriptions_updater::{IndexHandler, MoveIndexer};
 use crate::new_index::progress::Progress;
@@ -498,7 +499,7 @@ impl Indexer {
     pub fn index_inscription(&self, block: InscriptionParseBlock) -> anyhow::Result<()> {
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
 
-        const CHUNK_SIZE: usize = 3000;
+        const CHUNK_SIZE: usize = 2000;
         let Some(last_block_hash) = blocks.last().cloned() else {
             return Ok(());
         };
@@ -1081,6 +1082,7 @@ impl ChainQuery {
         let _timer = self.start_timer("tokens");
 
         let mut amount_by_tick = HashMap::new();
+        let mut transfers = HashMap::new();
 
         self.store
             .token_db
@@ -1095,17 +1097,25 @@ impl ChainQuery {
             .token_db
             .iter_scan(&TokenTransferKey::iter_key(&scripthash))
             .for_each(|x| {
+                let key = TokenTransferKey::parse_db_key(x.key);
                 let TransferProto::Bel20 { tick, amt } =
                     TokenTransferValue::from_db_value(&x.value).proto;
                 amount_by_tick.get_mut(&tick).unwrap().1 += amt;
+                transfers
+                    .entry(tick)
+                    .and_modify(|x: &mut Vec<_>| {
+                        x.push((key.location.into(), amt));
+                    })
+                    .or_insert(vec![(key.location.into(), amt)]);
             });
 
         let result = amount_by_tick
             .into_iter()
             .map(|(tick, (balance, transferable_balance))| TokenBalance {
-                tick,
+                tick: tick.clone(),
                 balance,
                 transferable_balance,
+                transfers: transfers.remove(&tick).unwrap_or_default(),
             })
             .collect();
         Ok(result)

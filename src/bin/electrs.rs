@@ -24,6 +24,7 @@ use electrs::{
     },
     rest,
     signal::Waiter,
+    util::bincode_util,
     HEIGHT_DELAY,
 };
 
@@ -101,7 +102,13 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         .copy_from_main_block(block_offset)
         .unwrap();
 
-    let mut token_cache = TokenCache::default();
+    let mut token_cache = {
+        if let Some(parsed) = store.temp_db().remove("tc".as_bytes()) {
+            serde_json::from_slice(&parsed).unwrap()
+        } else {
+            TokenCache::default()
+        }
+    };
 
     indexer
         .index_temp(
@@ -112,6 +119,10 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         .unwrap();
 
     store.inscription_db().flush();
+
+    token_cache.process_token_actions(Some(tip_height - HEIGHT_DELAY - 1));
+    token_cache.write_token_data(store.token_db());
+    token_cache.write_valid_transfers(store.token_db());
 
     let mempool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         Arc::clone(&chain),
@@ -214,6 +225,13 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         // Update subscribed clients
         electrum_server.notify();
     }
+
+    dbg!(bincode_util::serialize_big(&token_cache).unwrap().len());
+
+    store
+        .temp_db()
+        .put("tc".as_bytes(), &serde_json::to_vec(&token_cache).unwrap());
+
     info!("server stopped");
     Ok(())
 }
