@@ -13,6 +13,7 @@ use crate::chain::{
 };
 use crate::config::Config;
 use crate::daemon::Daemon;
+use crate::errors::*;
 use crate::inscription_entries::inscription::{
     InscriptionExtraData, InscriptionExtraDataValue, LastInscriptionNumber, OrdHistoryRow,
     PartialTxs, UserOrdStats,
@@ -27,7 +28,6 @@ use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
     BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
 };
-use crate::{errors::*, measure_time};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 use std::path::Path;
@@ -423,11 +423,10 @@ impl Indexer {
         &self,
         chain: Arc<ChainQuery>,
         block: InscriptionParseBlock,
+        token_cache: &mut TokenCache,
     ) -> anyhow::Result<()> {
         let inscription_updater = InscriptionUpdater::new(self.store.clone()).anyhow()?;
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
-
-        warn!("Blocks to temp index: {}", blocks.len());
 
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
@@ -438,13 +437,55 @@ impl Indexer {
 
             let txos = load_txos(&self.store.txstore_db, &txs);
 
-            for tx in txs {
+            let keys = txos
+                .iter()
+                .map(|(outpoint, v)| {
+                    TokenTransferKey::db_key(
+                        &v.script_pubkey.to_address_str(Network::Bellscoin).unwrap(),
+                        outpoint.clone(),
+                    )
+                })
+                .collect_vec();
+
+            let valid_transfers = self
+                .store
+                .token_db()
+                .db
+                .multi_get(keys.iter())
+                .into_iter()
+                .enumerate()
+                .map(|(idx, v)| {
+                    if let Ok(v) = v {
+                        if let Some(v) = v {
+                            let key = TokenTransferKey::parse_db_key(keys[idx].clone());
+                            let value = TokenTransferValue::from_db_value(&v);
+                            Some((key.location, (key.owner, value.proto)))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .flatten();
+
+            token_cache.valid_transfers.extend(valid_transfers);
+
+            drop(keys);
+
+            let txos = txos.into_iter().map(|x| (x.0, x.1.value)).collect();
+
+            for (i, tx) in txs.into_iter().enumerate() {
                 inscription_updater.index_transaction_inscriptions(
                     tx,
+                    i,
                     block_number as u32,
                     &txos,
+                    token_cache,
                 )?;
             }
+
+            token_cache.load_tokens_data(&self.store.token_db);
 
             inscription_updater
                 .copy_to_next_block(block_number as u32)
@@ -490,7 +531,7 @@ impl Indexer {
                 move_indexer.write_moves(moves).unwrap();
 
                 token_cache.load_tokens_data(self.store.token_db());
-                token_cache.process_token_actions();
+                token_cache.process_token_actions(None);
                 token_cache.write_token_data(self.store.token_db());
 
                 progress.inc(CHUNK_SIZE as u64)

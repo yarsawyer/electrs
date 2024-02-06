@@ -13,7 +13,6 @@ use crate::new_index::{ChainQuery, Mempool, ScriptStats, SpendingInput, Utxo};
 use crate::util::{is_spendable, BlockId, Bytes, TransactionStatus};
 
 use super::exchange_data::ExchangeData;
-use super::schema::OrdsSearcher;
 
 const FEE_ESTIMATES_TTL: u64 = 60; // seconds
 

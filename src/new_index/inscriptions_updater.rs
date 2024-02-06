@@ -10,7 +10,6 @@ use crate::{
         },
         InscriptionId,
     },
-    measure_time,
     new_index::{schema::TxOutRow, token::TransferProto},
     util::{bincode_util, errors::AsAnyhow, full_hash, HeaderEntry, ScriptToAddr},
 };
@@ -39,8 +38,10 @@ impl InscriptionUpdater {
     pub fn index_transaction_inscriptions(
         &self,
         tx: Transaction,
+        tx_idx: usize,
         block_height: u32,
         txos: &HashMap<OutPoint, u64>,
+        token_cache: &mut TokenCache,
     ) -> Result<u64> {
         let txid = tx.txid();
 
@@ -108,6 +109,14 @@ impl InscriptionUpdater {
                     &tx.output,
                 ) else {
                     inscription_extra.value.owner = "leaked 😭".to_owned();
+
+                    token_cache.try_transfered(
+                        block_height,
+                        tx_idx,
+                        prev_outpoint,
+                        "leaked".to_string(),
+                    );
+
                     self.store.inscription_db().write(
                         vec![inscription_extra.to_db_row()?],
                         crate::new_index::db::DBFlush::Disable,
@@ -126,6 +135,13 @@ impl InscriptionUpdater {
                         .anyhow_as("No owner :(")?;
 
                     inscription_extra.value.owner = new_owner.clone();
+
+                    token_cache.try_transfered(
+                        block_height,
+                        tx_idx,
+                        prev_outpoint,
+                        new_owner.clone(),
+                    );
 
                     OrdHistoryRow::new(new_owner, new_outpoint, prev_history_value)
                 };
@@ -242,6 +258,16 @@ impl InscriptionUpdater {
                         inscription.content_length().unwrap(),
                         inscription_number,
                         0,
+                    );
+
+                    token_cache.parse_token_action(
+                        inscription.content_type().unwrap(),
+                        inscription.body().unwrap(),
+                        block_height,
+                        tx_idx,
+                        owner.clone(),
+                        genesis,
+                        location,
                     );
 
                     self.store.inscription_db().write(
@@ -388,19 +414,16 @@ impl InscriptionUpdater {
                                 &extra.location,
                                 block_height,
                             );
-                            let (history_row, _) = self
-                                .store
-                                .temp_db()
-                                .remove(&history_key)
-                                .map(|x| {
-                                    OrdHistoryRow::from_temp_db_row(DBRow {
-                                        key: history_key,
-                                        value: x,
-                                    })
-                                    .unwrap()
+                            let history_row = self.store.temp_db().remove(&history_key).map(|x| {
+                                OrdHistoryRow::from_temp_db_row(DBRow {
+                                    key: history_key,
+                                    value: x,
                                 })
-                                .unwrap();
-                            to_restore.push(history_row.into_row());
+                                .unwrap()
+                            });
+                            if let Some((history_row, _)) = history_row {
+                                to_restore.push(history_row.into_row());
+                            }
                         }
                     });
             }
@@ -820,26 +843,27 @@ impl<'a> MoveIndexer<'a> {
         token_cache: &mut TokenCache,
     ) -> HashMap<OutPoint, MovedInscription> {
         let mut temp = vec![];
-        measure_time! {"Load data for moves": {
-            blocks
-                .par_iter()
-                .map(|(_, txs)| (load_txos(self.store.txstore_db(), txs), self.load_inscription(txs)))
-                .collect_into_vec(&mut temp);
-        }};
+        blocks
+            .par_iter()
+            .map(|(_, txs)| {
+                (
+                    load_txos(self.store.txstore_db(), txs),
+                    self.load_inscription(txs),
+                )
+            })
+            .collect_into_vec(&mut temp);
 
         let mut txos = HashMap::new();
         let mut inscriptions: HashMap<OutPoint, MovedInscription> = HashMap::new();
 
         for (txouts, inc) in temp {
-            txos.extend(txouts);
+            txos.extend(txouts.into_iter().map(|x| (x.0, x.1.value)));
             inscriptions.extend(inc);
         }
 
         if inscriptions.is_empty() {
             return HashMap::default();
         }
-
-        measure_time! {"Move parsing": {
 
         for (height, txs) in blocks {
             for tx in txs {
@@ -853,8 +877,10 @@ impl<'a> MoveIndexer<'a> {
                     .iter()
                     .enumerate()
                     .map(|(idx, x)| (idx, inscriptions.remove(&x.previous_output)))
-                    .filter(|x| x.1.is_some())
-                    .map(|x| (x.0, x.1.unwrap()))
+                    .filter_map(|x| {
+                        let Some(inc) = x.1 else { return None };
+                        Some((x.0, inc))
+                    })
                     .collect_vec();
 
                 if found_inscriptions.is_empty() {
@@ -872,7 +898,12 @@ impl<'a> MoveIndexer<'a> {
                         &tx.output,
                     ) else {
                         if inc.new_owner.is_none() {
-                            token_cache.try_transfered(*height, idx, inc.data.location, "leaked".to_owned());
+                            token_cache.try_transfered(
+                                *height,
+                                idx,
+                                inc.data.location,
+                                "leaked".to_owned(),
+                            );
                         }
                         inc.leaked = true;
                         inscriptions.insert(inc.data.location, inc);
@@ -887,7 +918,12 @@ impl<'a> MoveIndexer<'a> {
 
                     let new_owner = get_owner(tx, vout as usize).unwrap();
                     if inc.new_owner.is_none() {
-                        token_cache.try_transfered(*height, idx, inc.data.location, new_owner.clone());
+                        token_cache.try_transfered(
+                            *height,
+                            idx,
+                            inc.data.location,
+                            new_owner.clone(),
+                        );
                     }
 
                     inc.new_owner = Some(new_owner);
@@ -895,8 +931,6 @@ impl<'a> MoveIndexer<'a> {
                 }
             }
         }
-
-        }};
 
         inscriptions
     }
@@ -1033,7 +1067,7 @@ impl InscriptionSearcher {
     }
 }
 
-pub fn load_txos(tx_db: &DB, txs: &[Transaction]) -> HashMap<OutPoint, u64> {
+pub fn load_txos(tx_db: &DB, txs: &[Transaction]) -> HashMap<OutPoint, TxOut> {
     let keys_iter = txs
         .iter()
         .filter(|x| !x.is_coin_base())
@@ -1048,7 +1082,7 @@ pub fn load_txos(tx_db: &DB, txs: &[Transaction]) -> HashMap<OutPoint, u64> {
         .flatten()
         .map(|x| bitcoin::consensus::deserialize::<TxOut>(&x).expect("failed to parse TxOut"))
         .zip(keys_iter)
-        .map(|x| (x.1.clone(), x.0.value))
+        .map(|x| (x.1.clone(), x.0))
         .collect()
 }
 

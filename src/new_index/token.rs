@@ -10,6 +10,7 @@ use itertools::Itertools;
 use postcard;
 use serde::Deserialize;
 use serde_with::serde_as;
+use serde_with::DisplayFromStr;
 use std::collections::{HashMap, HashSet};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -37,7 +38,7 @@ pub enum MintProto {
     #[serde(rename = "bel-20")]
     Bel20 {
         tick: String,
-        #[serde_as(as = "DisplayFromStr")]
+        #[serde(with = ":: serde_with :: As :: < DisplayFromStr >")]
         amt: u64,
     },
 }
@@ -48,14 +49,14 @@ pub enum DeployProto {
     #[serde(rename = "bel-20")]
     Bel20 {
         tick: String,
-        #[serde_as(as = "DisplayFromStr")]
+        #[serde(with = ":: serde_with :: As :: < DisplayFromStr >")]
         max: u64,
-        #[serde_as(as = "DisplayFromStr")]
+        #[serde(with = ":: serde_with :: As :: < DisplayFromStr >")]
         lim: u128,
-        #[serde_as(as = "DisplayFromStr")]
+        #[serde(with = ":: serde_with :: As :: < DisplayFromStr >")]
         #[serde(default = "DeployProto::default_dec")]
         dec: u8,
-        #[serde_as(as = "DisplayFromStr")]
+        #[serde(with = ":: serde_with :: As :: < DisplayFromStr >")]
         #[serde(default = "DeployProto::default_supply")]
         supply: u64,
     },
@@ -79,7 +80,7 @@ pub enum TransferProto {
     #[serde(rename = "bel-20")]
     Bel20 {
         tick: String,
-        #[serde_as(as = "DisplayFromStr")]
+        #[serde(with = ":: serde_with :: As :: < DisplayFromStr >")]
         amt: u64,
     },
 }
@@ -92,7 +93,7 @@ pub struct TokenCache {
     // All token accounts. Used to check if a transfer is valid. Used like a cache, loaded from db before parsing.
     pub token_accounts: HashMap<TokenAccountKey, TokenAccountValue>,
 
-    // All token actions that not validated yet but just parsed.
+    // All token actions that not validated yet but just parsed. First u32 is height, second usize is index of transaction in block.
     pub token_actions: Vec<(u32, usize, TokenAction)>,
 
     // All transfer actions. Used to check if a transfer is valid. Used like cache.
@@ -170,7 +171,6 @@ impl TokenCache {
     }
 
     pub fn try_transfered(&mut self, h: u32, idx: usize, location: OutPoint, recipient: String) {
-        // ! Check if this is correct.
         if !self.all_transfers.contains_key(&location)
             || !self.valid_transfers.contains_key(&location)
         {
@@ -196,25 +196,44 @@ impl TokenCache {
                     proto: DeployProto::Bel20 { tick, .. },
                     ..
                 } => {
-                    tickers.insert(tick);
+                    tickers.insert(tick.clone());
                 }
                 TokenAction::Mint {
                     owner,
                     proto: MintProto::Bel20 { tick, .. },
                     ..
                 } => {
-                    tickers.insert(tick);
-                    users.insert((owner, tick));
+                    tickers.insert(tick.clone());
+                    users.insert((owner, tick.clone()));
                 }
                 TokenAction::Transfer {
                     owner,
                     proto: TransferProto::Bel20 { tick, .. },
                     ..
                 } => {
-                    tickers.insert(tick);
-                    users.insert((owner, tick));
+                    tickers.insert(tick.clone());
+                    users.insert((owner, tick.clone()));
                 }
-                _ => {}
+                TokenAction::Transfered {
+                    transfer_location,
+                    recipient,
+                } => {
+                    let proto = {
+                        self.all_transfers
+                            .get(&transfer_location)
+                            .map(|x| Some(x.clone()))
+                            .unwrap_or_else(|| {
+                                self.valid_transfers
+                                    .get(&transfer_location)
+                                    .map(|x| Some(x.1.clone()))
+                                    .unwrap_or(None)
+                            })
+                    };
+                    if let Some(TransferProto::Bel20 { tick, .. }) = proto {
+                        users.insert((recipient, tick.clone()));
+                        tickers.insert(tick.clone());
+                    }
+                }
             }
         }
 
@@ -261,12 +280,30 @@ impl TokenCache {
         self.token_accounts = token_accounts;
     }
 
-    pub fn process_token_actions(&mut self) {
+    pub fn process_token_actions(&mut self, height: Option<u32>) {
         // We should sort token actions before processing them.
         self.token_actions
             .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        let max_idx = if let Some(height) = height {
+            let mut res = None;
+            for (i, (h, _, _)) in self.token_actions.iter().enumerate() {
+                if *h > height {
+                    res = Some(i);
+                    break;
+                }
+            }
+            res
+        } else {
+            None
+        };
 
-        for (_, _, action) in self.token_actions.drain(..) {
+        let token_actions = if let Some(max_idx) = max_idx {
+            self.token_actions.drain(..=max_idx)
+        } else {
+            self.token_actions.drain(..)
+        };
+
+        for (_, _, action) in token_actions {
             match action {
                 TokenAction::Deploy { genesis, proto } => {
                     let tick = match &proto {
@@ -333,6 +370,7 @@ impl TokenCache {
                 TokenAction::Transfered {
                     transfer_location,
                     recipient,
+                    ..
                 } => {
                     let Some((_, TransferProto::Bel20 { tick, amt })) =
                         self.valid_transfers.remove(&transfer_location)
@@ -363,7 +401,6 @@ impl TokenCache {
                 value: v.to_db_value(),
             })
             .collect_vec();
-        warn!("tokens len {}", tokens.len());
         token_db.write(tokens, super::db::DBFlush::Disable);
 
         let token_accounts = self
@@ -374,7 +411,6 @@ impl TokenCache {
                 value: v.to_db_value(),
             })
             .collect_vec();
-        warn!("token_acc len {}", token_accounts.len());
         token_db.write(token_accounts, super::db::DBFlush::Disable);
     }
 
@@ -384,13 +420,7 @@ impl TokenCache {
                 .valid_transfers
                 .drain()
                 .map(|(location, (owner, proto))| {
-                    let TransferProto::Bel20 { tick, .. } = &proto;
-                    let key = TokenTransferKey {
-                        location,
-                        owner,
-                        tick: tick.clone(),
-                    }
-                    .to_db_key();
+                    let key = TokenTransferKey { location, owner }.to_db_key();
                     let value = TokenTransferValue { proto }.to_db_value();
                     DBRow { key, value }
                 })
@@ -419,7 +449,7 @@ pub enum TokenAction {
         owner: String,
         proto: TransferProto,
     },
-    // ? Transfered token action.
+    // ? Founded move of transfer action.
     Transfered {
         transfer_location: OutPoint,
         recipient: String,
@@ -491,22 +521,22 @@ impl TokenAccountValue {
 #[derive(PartialEq, Eq, Hash)]
 pub struct TokenTransferKey {
     pub owner: String,
-    pub tick: String,
     pub location: OutPoint,
 }
+
+type TokenTransferParseType = (String, String, [u8; 32], u32);
+
 impl TokenTransferKey {
     pub fn iter_key(owner: &str) -> Vec<u8> {
         bincode_util::serialize_big(&(ADDRESS_TICK_LOCATION_TO_TRANSFER, owner)).unwrap()
     }
 
     pub fn parse_transfer_key(raw: Vec<u8>) -> Self {
-        type ParseType = (String, String, String, [u8; 32], u32);
-        let (_, owner, tick, txid, vout) =
-            bincode_util::deserialize_big::<ParseType>(&raw).unwrap();
+        let (_, owner, txid, vout) =
+            bincode_util::deserialize_big::<TokenTransferParseType>(&raw).unwrap();
 
         Self {
             owner,
-            tick,
             location: OutPoint {
                 txid: Txid::from_slice(txid.as_slice()).unwrap(),
                 vout,
@@ -517,21 +547,31 @@ impl TokenTransferKey {
         bincode_util::serialize_big(&(
             ADDRESS_TICK_LOCATION_TO_TRANSFER,
             &self.owner,
-            &self.tick,
             self.location.txid.into_inner(),
             self.location.vout,
         ))
         .unwrap()
     }
-    pub fn db_key(owner: &str, tick: &str, location: OutPoint) -> Vec<u8> {
+    pub fn db_key(owner: &str, location: OutPoint) -> Vec<u8> {
         bincode_util::serialize_big(&(
             ADDRESS_TICK_LOCATION_TO_TRANSFER,
             owner,
-            tick,
             location.txid.into_inner(),
             location.vout,
         ))
         .unwrap()
+    }
+
+    pub fn parse_db_key(key: Vec<u8>) -> Self {
+        let (_, owner, txid, vout) =
+            bincode_util::deserialize_big::<TokenTransferParseType>(&key).unwrap();
+        Self {
+            owner,
+            location: OutPoint {
+                txid: Txid::from_slice(txid.as_slice()).unwrap(),
+                vout,
+            },
+        }
     }
 }
 

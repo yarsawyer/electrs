@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
 use anyhow::Ok;
-use bitcoin::{blockdata::block, hashes::Hash, OutPoint, Txid};
+use bitcoin::{hashes::Hash, OutPoint, Txid};
 use itertools::Itertools;
 
 use crate::{

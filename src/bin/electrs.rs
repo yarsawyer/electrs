@@ -19,8 +19,8 @@ use electrs::{
     errors::*,
     metrics::Metrics,
     new_index::{
-        exchange_data::ExchangeData, precache, schema::InscriptionParseBlock, ChainQuery,
-        FetchFrom, Indexer, InscriptionUpdater, Mempool, Query, Store,
+        exchange_data::ExchangeData, precache, schema::InscriptionParseBlock, token::TokenCache,
+        ChainQuery, FetchFrom, Indexer, InscriptionUpdater, Mempool, Query, Store,
     },
     rest,
     signal::Waiter,
@@ -101,10 +101,13 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         .copy_from_main_block(block_offset)
         .unwrap();
 
+    let mut token_cache = TokenCache::default();
+
     indexer
         .index_temp(
             chain.clone(),
             InscriptionParseBlock::FromHeight(temp_offset + 1, HEIGHT_DELAY),
+            &mut token_cache,
         )
         .unwrap();
 
@@ -192,8 +195,17 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             }
 
             indexer
-                .index_temp(chain.clone(), InscriptionParseBlock::AtHeight(block))
+                .index_temp(
+                    chain.clone(),
+                    InscriptionParseBlock::AtHeight(block),
+                    &mut token_cache,
+                )
                 .unwrap();
+
+            token_cache.process_token_actions(Some(block - HEIGHT_DELAY - 1));
+
+            token_cache.write_token_data(store.token_db());
+            token_cache.write_valid_transfers(store.token_db());
         };
 
         // Update mempool
