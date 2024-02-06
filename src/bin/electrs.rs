@@ -83,12 +83,6 @@ fn run_server(config: Arc<Config>) -> Result<()> {
 
     let ot = indexer.clear_temp(block_offset);
 
-    let temp_offset = if let Some(ot) = ot {
-        ot + HEIGHT_DELAY
-    } else {
-        block_offset
-    };
-
     indexer
         .index_inscription(InscriptionParseBlock::FromToHeight(
             ot.unwrap_or(config.first_inscription_block as u32),
@@ -113,14 +107,14 @@ fn run_server(config: Arc<Config>) -> Result<()> {
     indexer
         .index_temp(
             chain.clone(),
-            InscriptionParseBlock::FromHeight(temp_offset + 1, HEIGHT_DELAY),
+            InscriptionParseBlock::FromHeight(ot.unwrap_or(block_offset) + 1, HEIGHT_DELAY),
             &mut token_cache,
         )
         .unwrap();
 
     store.inscription_db().flush();
 
-    token_cache.process_token_actions(Some(tip_height - HEIGHT_DELAY - 1));
+    token_cache.process_token_actions(Some(block_offset));
     token_cache.write_token_data(store.token_db());
     token_cache.write_valid_transfers(store.token_db());
 
@@ -226,7 +220,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         electrum_server.notify();
     }
 
-    dbg!(bincode_util::serialize_big(&token_cache).unwrap().len());
+    dbg!(serde_json::to_vec(&token_cache).unwrap().len());
 
     store
         .temp_db()

@@ -13,7 +13,6 @@ use crate::chain::{
 };
 use crate::config::Config;
 use crate::daemon::Daemon;
-use crate::errors::*;
 use crate::inscription_entries::inscription::{
     InscriptionExtraData, InscriptionExtraDataValue, LastInscriptionNumber, OrdHistoryRow,
     PartialTxs, UserOrdStats,
@@ -29,6 +28,7 @@ use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
     BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
 };
+use crate::{errors::*, HEIGHT_DELAY};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 use std::path::Path;
@@ -235,7 +235,6 @@ impl From<&Config> for IndexerConfig {
 pub enum InscriptionParseBlock {
     FromHeight(u32, u32),
     FromToHeight(u32, u32),
-    ToHeight(u32),
     AtHeight(u32),
 }
 
@@ -264,25 +263,17 @@ impl Indexer {
     }
 
     pub fn clear_temp(&self, block_height: u32) -> Option<u32> {
-        let last_indexed_block: Option<BlockHash> = self
+        let last_number = self
             .store
             .inscription_db()
             .get(b"ot")
-            .map(|x| BlockHash::from_slice(&x).unwrap());
-
-        let last_number = last_indexed_block
+            .map(|x| BlockHash::from_slice(&x).unwrap())
             .map(|x| self.get_block_height(x))
-            .flatten();
-
-        if let None = last_number {
-            return None;
-        }
-
-        let last_number = last_number.unwrap() as u32;
+            .flatten()? as u32;
 
         let mut to_delete = vec![];
         let block_d = block_height - last_number;
-        let remove_blocks_to = block_height - 1;
+        let remove_blocks_to = block_height;
 
         for i in self.store.temp_db().iter_scan_reverse(
             &PartialTxs::get_temp_iter_key(0),
@@ -329,17 +320,6 @@ impl Indexer {
 
         self.store.temp_db().delete_batch(to_delete);
 
-        // let ot_hash = self
-        //     .store
-        //     .indexed_headers
-        //     .read()
-        //     .header_by_height((last_number + block_d) as usize)
-        //     .unwrap()
-        //     .hash()
-        //     .clone();
-
-        // self.store.inscription_db.put(b"ot", &ot_hash.into_inner());
-
         Some(last_number)
     }
 
@@ -383,32 +363,6 @@ impl Indexer {
                     .map(|x| *x.hash())
                     .collect_vec()
             }
-            InscriptionParseBlock::ToHeight(height) => {
-                let last_indexed_block: Option<BlockHash> = self
-                    .store
-                    .inscription_db()
-                    .get(b"ot")
-                    .map(|x| BlockHash::from_slice(&x).unwrap());
-
-                let last_number = last_indexed_block
-                    .map(|x| self.get_block_height(x))
-                    .flatten()
-                    .unwrap_or(22490);
-
-                // ! FOR TESTS
-                // let last_number = 22489;
-
-                if last_number == height as usize {
-                    return Ok(vec![]);
-                }
-
-                self.store
-                    .indexed_headers
-                    .read()
-                    .header_by_range(last_number, height as usize)
-                    .map(|x| *x.hash())
-                    .collect()
-            }
             InscriptionParseBlock::AtHeight(height) => vec![*self
                 .store
                 .indexed_headers
@@ -428,6 +382,25 @@ impl Indexer {
     ) -> anyhow::Result<()> {
         let inscription_updater = InscriptionUpdater::new(self.store.clone()).anyhow()?;
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
+
+        if let Some(last_block_hash) = blocks.last() {
+            let block_number =
+                self.get_block_height(*last_block_hash).unwrap() - HEIGHT_DELAY as usize;
+            let block_entry = self
+                .store
+                .indexed_headers
+                .read()
+                .header_by_height(block_number)
+                .unwrap()
+                .hash()
+                .clone();
+
+            error!("Writing last block number {block_number}");
+
+            self.store
+                .inscription_db
+                .put(b"ot", &block_entry.into_inner());
+        };
 
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
@@ -499,8 +472,8 @@ impl Indexer {
     pub fn index_inscription(&self, block: InscriptionParseBlock) -> anyhow::Result<()> {
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
 
-        const CHUNK_SIZE: usize = 2000;
-        let Some(last_block_hash) = blocks.last().cloned() else {
+        const CHUNK_SIZE: usize = 3000;
+        let Some(_) = blocks.last().cloned() else {
             return Ok(());
         };
 
@@ -544,10 +517,6 @@ impl Indexer {
         indexer.write_patrials().unwrap();
         indexer.write_inscription_number().unwrap();
         token_cache.write_valid_transfers(self.store.token_db());
-
-        self.store
-            .inscription_db
-            .put(b"ot", &last_block_hash.into_inner());
 
         self.start_auto_compactions(&self.store.inscription_db);
         self.start_auto_compactions(&self.store.token_db);

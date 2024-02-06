@@ -487,18 +487,6 @@ impl InscriptionUpdater {
 
         self.store.temp_db().delete_batch(to_delete);
 
-        let last_block_hash = *self
-            .store
-            .indexed_headers
-            .read()
-            .header_by_height(block_height as usize)
-            .unwrap()
-            .hash();
-
-        self.store
-            .inscription_db()
-            .put(b"ot", &last_block_hash.into_inner());
-
         Ok(())
     }
 
