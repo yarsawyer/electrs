@@ -1084,7 +1084,7 @@ macro_rules! measure_time {
     }};
 }
 
-fn get_owner(tx: &Transaction, idx: usize) -> Option<String> {
+pub fn get_owner(tx: &Transaction, idx: usize) -> Option<String> {
     tx.output[idx]
         .script_pubkey
         .to_address_str(crate::chain::Network::Bellscoin)

@@ -415,7 +415,12 @@ impl Indexer {
                 .iter()
                 .map(|(outpoint, v)| {
                     TokenTransferKey::db_key(
-                        &v.script_pubkey.to_address_str(Network::Bellscoin).unwrap(),
+                        &v.script_pubkey
+                            .to_address_str(Network::Bellscoin)
+                            .unwrap_or_else(|| {
+                                error!("{}", outpoint);
+                                panic!("Failed to get address")
+                            }),
                         outpoint.clone(),
                     )
                 })

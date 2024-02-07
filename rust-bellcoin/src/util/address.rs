@@ -367,7 +367,10 @@ pub enum Payload {
 impl Payload {
     /// Constructs a [Payload] from an output script (`scriptPubkey`).
     pub fn from_script(script: &script::Script) -> Option<Payload> {
-        Some(if script.is_p2pkh() {
+        Some(
+        if script.is_p2pk() {
+            Payload::PubkeyHash(PubkeyHash::hash(&script.as_bytes()[1..script.len()-1]))
+        } else if script.is_p2pkh() {
             let mut hash_inner = [0u8; 20];
             hash_inner.copy_from_slice(&script.as_bytes()[3..23]);
             Payload::PubkeyHash(PubkeyHash::from_inner(hash_inner))

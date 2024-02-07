@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim AS base
+FROM rust:slim-buster AS base
 
 RUN apt update -qy
 RUN apt install -qy librocksdb-dev
@@ -15,7 +15,3 @@ RUN cargo build --release --bin electrs
 FROM base as deploy
 
 COPY --from=build /build/target/release/electrs /bin/electrs
-
-EXPOSE 50001
-
-ENTRYPOINT ["/bin/electrs"]
