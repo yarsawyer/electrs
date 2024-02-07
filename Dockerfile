@@ -1,11 +1,11 @@
 FROM rust:slim-buster AS base
 
 RUN apt update -qy
-RUN apt install -qy librocksdb-dev libssl-dev
+RUN apt install -qy librocksdb-dev
 
 FROM base as build
 
-RUN apt install -qy git cargo clang cmake
+RUN apt install -qy git cargo clang cmake libssl-dev
 
 WORKDIR /build
 COPY . .
