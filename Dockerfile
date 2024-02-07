@@ -1,17 +1,19 @@
-FROM rust:slim-buster AS base
+FROM rust:latest AS base
 
 RUN apt update -qy
 RUN apt install -qy librocksdb-dev
 
-FROM base as build
 
+FROM base as builder
+
+WORKDIR /usr/src/app
 RUN apt install -qy git cargo clang cmake libssl-dev
+RUN rustup target add x86_64-unknown-linux-musl
+COPY Cargo.toml Cargo.lock ./
+COPY src src
+RUN cargo build --target x86_64-unknown-linux-musl --release
 
-WORKDIR /build
-COPY . .
 
-RUN cargo build --release --bin electrs
+FROM base as runner
 
-FROM base as deploy
-
-COPY --from=build /build/target/release/electrs /bin/electrs
+COPY --from=builder /usr/src/app/target/x86_64-unknown-linux-musl/release/electrs /bin/electrs
