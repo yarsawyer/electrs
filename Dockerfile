@@ -1,7 +1,7 @@
 FROM rust:slim-buster AS base
 
 RUN apt update -qy
-RUN apt install -qy librocksdb-dev openssl-devel
+RUN apt install -qy librocksdb-dev libssl-dev
 
 FROM base as build
 
