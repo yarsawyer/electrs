@@ -11,6 +11,7 @@ RUN apt install -qy git cargo clang cmake libssl-dev
 RUN rustup target add x86_64-unknown-linux-musl
 COPY Cargo.toml Cargo.lock ./
 COPY src src
+COPY rust-bellcoin rust-bellcoin
 RUN cargo build --target x86_64-unknown-linux-musl --release
 
 
