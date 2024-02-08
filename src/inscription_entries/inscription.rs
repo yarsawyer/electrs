@@ -877,7 +877,7 @@ pub fn update_last_block_number(store: &Store, block_height: u32) {
                 .unwrap()
                 .height()
         } else {
-            22700
+            22490
         }
     };
 
