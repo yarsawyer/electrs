@@ -4,8 +4,8 @@ use crate::{
     inscription_entries::{
         index::PARTIAL_TXID_TO_TXIDS,
         inscription::{
-            Inscription, InscriptionContent, InscriptionExtraData, LastInscriptionNumber,
-            OrdHistoryRow, OrdHistoryValue, ParsedInscription, PartialTxs,
+            update_last_block_number, Inscription, InscriptionContent, InscriptionExtraData,
+            LastInscriptionNumber, OrdHistoryRow, OrdHistoryValue, ParsedInscription, PartialTxs,
         },
         InscriptionId,
     },
@@ -482,6 +482,8 @@ impl InscriptionUpdater {
 
     pub fn remove_temp_data_orhpan(&self, block_height: u32) -> anyhow::Result<()> {
         let mut to_delete = vec![];
+
+        update_last_block_number(&self.store, block_height);
 
         for i in self
             .store

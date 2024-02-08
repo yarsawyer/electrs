@@ -17,7 +17,7 @@ use electrs::{
     daemon::Daemon,
     electrum::RPC as ElectrumRPC,
     errors::*,
-    inscription_entries::inscription::InscriptionContent,
+    inscription_entries::inscription::{update_last_block_number, InscriptionContent},
     metrics::Metrics,
     new_index::{
         exchange_data::ExchangeData, precache, schema::InscriptionParseBlock, token::TokenCache,
@@ -102,6 +102,8 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             sender.clone(),
         )
         .unwrap();
+
+    update_last_block_number(&store, block_offset);
 
     let inscription_updater = InscriptionUpdater::new(store.clone()).unwrap();
 

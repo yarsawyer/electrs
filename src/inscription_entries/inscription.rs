@@ -1,13 +1,13 @@
 use std::convert::TryInto;
 
 use anyhow::Ok;
-use bitcoin::{hashes::Hash, OutPoint, Txid};
+use bitcoin::{hashes::Hash, BlockHash, OutPoint, Txid};
 use itertools::Itertools;
 
 use crate::{
     inscription_entries::index::PARTIAL_TXID_TO_TXIDS,
     media::Media,
-    new_index::DBRow,
+    new_index::{DBRow, Store},
     util::{bincode_util, errors::AsAnyhow, Bytes},
 };
 
@@ -856,4 +856,29 @@ pub struct InscriptionContent {
     pub content_type: String,
     pub body: Vec<u8>,
     pub inscription_id: InscriptionId,
+}
+
+pub fn update_last_block_number(store: &Store, block_height: u32) {
+    let block_entry = store
+        .indexed_headers
+        .read()
+        .header_by_height(block_height as usize)
+        .unwrap()
+        .hash()
+        .clone();
+
+    let prev_block_height = {
+        let prev_hash = BlockHash::from_slice(&store.inscription_db().get(b"ot").unwrap()).unwrap();
+        store
+            .indexed_headers
+            .read()
+            .header_by_blockhash(&prev_hash)
+            .unwrap()
+            .height()
+    };
+
+    if prev_block_height < block_height as usize {
+        error!("Writing last block number {block_height}");
+        store.inscription_db().put(b"ot", &block_entry.into_inner());
+    }
 }

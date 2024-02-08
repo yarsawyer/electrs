@@ -610,5 +610,11 @@ pub struct TokenBalance {
     pub tick: String,
     pub balance: u64,
     pub transferable_balance: u64,
-    pub transfers: Vec<(InscriptionId, u64)>,
+    pub transfers: Vec<TokenTransfer>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TokenTransfer {
+    pub inscription_id: InscriptionId,
+    pub amount: u64,
 }

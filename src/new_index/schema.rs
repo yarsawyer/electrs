@@ -38,8 +38,8 @@ use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
 
 use super::inscriptions_updater::{load_txos, InscriptionUpdater};
 use super::token::{
-    TokenAccountKey, TokenAccountValue, TokenBalance, TokenTransferKey, TokenTransferValue,
-    TransferProto,
+    TokenAccountKey, TokenAccountValue, TokenBalance, TokenTransfer, TokenTransferKey,
+    TokenTransferValue, TransferProto,
 };
 
 const MIN_HISTORY_ITEMS_TO_CACHE: usize = 50;
@@ -375,25 +375,6 @@ impl Indexer {
     ) -> anyhow::Result<()> {
         let inscription_updater = InscriptionUpdater::new(self.store.clone()).anyhow()?;
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
-
-        if let Some(last_block_hash) = blocks.last() {
-            let block_number =
-                self.get_block_height(*last_block_hash).unwrap() - HEIGHT_DELAY as usize;
-            let block_entry = self
-                .store
-                .indexed_headers
-                .read()
-                .header_by_height(block_number)
-                .unwrap()
-                .hash()
-                .clone();
-
-            error!("Writing last block number {block_number}");
-
-            self.store
-                .inscription_db
-                .put(b"ot", &block_entry.into_inner());
-        };
 
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
@@ -1079,9 +1060,15 @@ impl ChainQuery {
                 transfers
                     .entry(tick)
                     .and_modify(|x: &mut Vec<_>| {
-                        x.push((key.location.into(), amt));
+                        x.push(TokenTransfer {
+                            inscription_id: key.location.into(),
+                            amount: amt,
+                        });
                     })
-                    .or_insert(vec![(key.location.into(), amt)]);
+                    .or_insert(vec![TokenTransfer {
+                        inscription_id: key.location.into(),
+                        amount: amt,
+                    }]);
             });
 
         let result = amount_by_tick
@@ -1092,6 +1079,7 @@ impl ChainQuery {
                 transferable_balance,
                 transfers: transfers.remove(&tick).unwrap_or_default(),
             })
+            .sorted_by_key(|x| x.tick.clone())
             .collect();
         Ok(result)
     }
