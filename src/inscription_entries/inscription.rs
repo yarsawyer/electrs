@@ -868,13 +868,17 @@ pub fn update_last_block_number(store: &Store, block_height: u32) {
         .clone();
 
     let prev_block_height = {
-        let prev_hash = BlockHash::from_slice(&store.inscription_db().get(b"ot").unwrap()).unwrap();
-        store
-            .indexed_headers
-            .read()
-            .header_by_blockhash(&prev_hash)
-            .unwrap()
-            .height()
+        if let Some(ot) = store.inscription_db().get(b"ot") {
+            let prev_hash = BlockHash::from_slice(&ot).unwrap();
+            store
+                .indexed_headers
+                .read()
+                .header_by_blockhash(&prev_hash)
+                .unwrap()
+                .height()
+        } else {
+            22700
+        }
     };
 
     if prev_block_height < block_height as usize {
