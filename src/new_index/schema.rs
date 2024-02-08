@@ -14,10 +14,9 @@ use crate::chain::{
 use crate::config::Config;
 use crate::daemon::Daemon;
 use crate::inscription_entries::inscription::{
-    InscriptionExtraData, InscriptionExtraDataValue, LastInscriptionNumber, OrdHistoryRow,
-    PartialTxs, UserOrdStats,
+    InscriptionContent, InscriptionExtraData, InscriptionExtraDataValue, LastInscriptionNumber,
+    OrdHistoryRow, PartialTxs, UserOrdStats,
 };
-use crate::inscription_entries::InscriptionId;
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::new_index::inscriptions_updater::{IndexHandler, MoveIndexer};
 use crate::new_index::progress::Progress;
@@ -64,7 +63,6 @@ pub struct Store {
     added_blockhashes: parking_lot::RwLock<HashSet<BlockHash>>,
     indexed_blockhashes: parking_lot::RwLock<HashSet<BlockHash>>,
     pub indexed_headers: parking_lot::RwLock<HeaderList>,
-    outpoint_cache: parking_lot::RwLock<HashMap<OutPoint, u64>>,
 }
 
 impl Store {
@@ -72,16 +70,15 @@ impl Store {
         let txstore_db = DB::open(&path.join("txstore"), config);
         let temp_db = DB::open(&path.join("temp"), config);
         let token_db = DB::open(&path.join("token"), config);
+        let history_db = DB::open(&path.join("history"), config);
+        let cache_db = DB::open(&path.join("cache"), config);
+        let inscription_db = DB::open(&path.join("inscription"), config);
+
         let added_blockhashes = load_blockhashes(&txstore_db, &BlockRow::done_filter());
         debug!("{} blocks were added", added_blockhashes.len());
 
-        let history_db = DB::open(&path.join("history"), config);
         let indexed_blockhashes = load_blockhashes(&history_db, &BlockRow::done_filter());
         debug!("{} blocks were indexed", indexed_blockhashes.len());
-
-        let cache_db = DB::open(&path.join("cache"), config);
-
-        let inscription_db = DB::open(&path.join("inscription"), config);
 
         let headers = if let Some(tip_hash) = txstore_db.get(b"t") {
             let tip_hash = deserialize(&tip_hash).expect("invalid chain tip in `t`");
@@ -106,7 +103,6 @@ impl Store {
             added_blockhashes: parking_lot::RwLock::new(added_blockhashes),
             indexed_blockhashes: parking_lot::RwLock::new(indexed_blockhashes),
             indexed_headers: parking_lot::RwLock::new(headers),
-            outpoint_cache: parking_lot::RwLock::new(HashMap::<OutPoint, u64>::new()),
         }
     }
 
@@ -132,10 +128,6 @@ impl Store {
 
     pub fn inscription_db(&self) -> &DB {
         &self.inscription_db
-    }
-
-    pub fn outpoint_cache(&self) -> &parking_lot::RwLock<HashMap<OutPoint, u64>> {
-        &self.outpoint_cache
     }
 
     pub fn done_initial_sync(&self) -> bool {
@@ -379,6 +371,7 @@ impl Indexer {
         chain: Arc<ChainQuery>,
         block: InscriptionParseBlock,
         token_cache: &mut TokenCache,
+        sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
     ) -> anyhow::Result<()> {
         let inscription_updater = InscriptionUpdater::new(self.store.clone()).anyhow()?;
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
@@ -461,6 +454,7 @@ impl Indexer {
                     block_number as u32,
                     &txos,
                     token_cache,
+                    sender.clone(),
                 )?;
             }
 
@@ -474,10 +468,14 @@ impl Indexer {
         Ok(())
     }
 
-    pub fn index_inscription(&self, block: InscriptionParseBlock) -> anyhow::Result<()> {
+    pub fn index_inscription(
+        &self,
+        block: InscriptionParseBlock,
+        sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
+    ) -> anyhow::Result<()> {
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
 
-        const CHUNK_SIZE: usize = 3000;
+        const CHUNK_SIZE: usize = 1000;
         let Some(_) = blocks.last().cloned() else {
             return Ok(());
         };
@@ -502,18 +500,22 @@ impl Indexer {
                 let chunked = indexer.load_blocks_chunks(blocks_chunk.collect_vec());
 
                 // Handle inscriptions in blocks
-                let inscriptions = indexer.handle_blocks(&chunked, &mut token_cache);
+
+                let inscriptions =
+                    indexer.handle_blocks(&chunked, &mut token_cache, sender.clone());
+
                 indexer.write_inscription(inscriptions).unwrap();
 
                 // Handle moves in blocks
                 let moves = move_indexer.handle(&chunked, &mut token_cache);
+
                 move_indexer.write_moves(moves).unwrap();
 
                 token_cache.load_tokens_data(self.store.token_db());
                 token_cache.process_token_actions(None);
                 token_cache.write_token_data(self.store.token_db());
 
-                progress.inc(CHUNK_SIZE as u64)
+                progress.inc(CHUNK_SIZE as u64);
             }
         }
 
@@ -524,7 +526,6 @@ impl Indexer {
         token_cache.write_valid_transfers(self.store.token_db());
 
         self.start_auto_compactions(&self.store.inscription_db);
-        self.start_auto_compactions(&self.store.token_db);
 
         Ok(())
     }

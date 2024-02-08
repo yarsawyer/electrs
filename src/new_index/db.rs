@@ -1,5 +1,3 @@
-use rocksdb;
-
 use std::path::Path;
 
 use crate::config::Config;

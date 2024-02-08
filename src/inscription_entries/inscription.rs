@@ -851,3 +851,9 @@ impl LastInscriptionNumber {
         })
     }
 }
+
+pub struct InscriptionContent {
+    pub content_type: String,
+    pub body: Vec<u8>,
+    pub inscription_id: InscriptionId,
+}

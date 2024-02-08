@@ -407,7 +407,7 @@ impl TokenCache {
     }
 
     pub fn write_token_data(&mut self, token_db: &DB) {
-        let tokens = self
+        let mut to_write = self
             .tokens
             .drain()
             .map(|(k, v)| DBRow {
@@ -415,17 +415,13 @@ impl TokenCache {
                 value: v.to_db_value(),
             })
             .collect_vec();
-        token_db.write(tokens, super::db::DBFlush::Disable);
 
-        let token_accounts = self
-            .token_accounts
-            .drain()
-            .map(|(k, v)| DBRow {
-                key: k.to_db_key(),
-                value: v.to_db_value(),
-            })
-            .collect_vec();
-        token_db.write(token_accounts, super::db::DBFlush::Disable);
+        to_write.extend(self.token_accounts.drain().map(|(k, v)| DBRow {
+            key: k.to_db_key(),
+            value: v.to_db_value(),
+        }));
+
+        token_db.write(to_write, super::db::DBFlush::Enable);
     }
 
     pub fn write_valid_transfers(&mut self, token_db: &DB) {
@@ -440,7 +436,7 @@ impl TokenCache {
                 })
                 .collect_vec();
 
-            token_db.write(transfers, super::db::DBFlush::Disable);
+            token_db.write(transfers, super::db::DBFlush::Enable);
         }
     }
 }

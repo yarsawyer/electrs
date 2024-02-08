@@ -3,10 +3,9 @@ use std::{collections::HashMap, convert::TryInto, sync::Arc};
 use crate::{
     inscription_entries::{
         index::PARTIAL_TXID_TO_TXIDS,
-        inscription::Inscription,
         inscription::{
-            InscriptionExtraData, LastInscriptionNumber, OrdHistoryRow, OrdHistoryValue,
-            ParsedInscription, PartialTxs,
+            Inscription, InscriptionContent, InscriptionExtraData, LastInscriptionNumber,
+            OrdHistoryRow, OrdHistoryValue, ParsedInscription, PartialTxs,
         },
         InscriptionId,
     },
@@ -42,6 +41,7 @@ impl InscriptionUpdater {
         block_height: u32,
         txos: &HashMap<OutPoint, u64>,
         token_cache: &mut TokenCache,
+        sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
     ) -> Result<u64> {
         let txid = tx.txid();
 
@@ -259,6 +259,14 @@ impl InscriptionUpdater {
                         inscription_number,
                         0,
                     );
+
+                    sender
+                        .send(InscriptionContent {
+                            body: inscription.body().unwrap().to_vec(),
+                            content_type: inscription.content_type().unwrap().to_string(),
+                            inscription_id: og_inscription_id,
+                        })
+                        .anyhow_as("Failed to send inscription content")?;
 
                     token_cache.parse_token_action(
                         inscription.content_type().unwrap(),
@@ -530,7 +538,11 @@ pub struct IndexHandler<'a> {
     pub inscription_number: u64,
 }
 impl<'a> IndexHandler<'a> {
-    pub fn try_parse_inscription(h: u32, txs: &[Transaction]) -> DigestedBlock {
+    pub fn try_parse_inscription(
+        h: u32,
+        txs: &[Transaction],
+        sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
+    ) -> DigestedBlock {
         let mut partials: HashMap<Txid, Vec<(u32, usize, Transaction)>> = HashMap::new();
         let mut inscriptions = vec![];
         let mut rest = vec![];
@@ -544,6 +556,7 @@ impl<'a> IndexHandler<'a> {
                 &mut partials,
                 &mut inscriptions,
                 &mut token_cache,
+                sender.clone(),
             ) {
                 rest.push((h, i, tx.clone()));
             }
@@ -562,11 +575,12 @@ impl<'a> IndexHandler<'a> {
         &mut self,
         blocks: &Vec<(u32, Vec<Transaction>)>,
         token_cache: &mut TokenCache,
+        sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
     ) -> Vec<InscriptionTemplate> {
         let mut data = vec![];
         blocks
             .into_par_iter()
-            .map(|(h, txs)| Self::try_parse_inscription(*h, txs))
+            .map(|(h, txs)| Self::try_parse_inscription(*h, txs, sender.clone()))
             .collect_into_vec(&mut data);
         data.sort_unstable_by_key(|x| x.height);
 
@@ -585,6 +599,7 @@ impl<'a> IndexHandler<'a> {
                     &mut self.cached_partial,
                     &mut digested_block.completed_inscription,
                     token_cache,
+                    sender.clone(),
                 );
             }
 
@@ -605,6 +620,7 @@ impl<'a> IndexHandler<'a> {
         cache: &mut HashMap<Txid, Vec<(u32, usize, Transaction)>>,
         inscriptions: &mut Vec<(usize, InscriptionTemplate)>,
         token_cache: &mut TokenCache,
+        sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
     ) -> bool {
         let mut chain = cache
             .remove(&tx.input[0].previous_output.txid)
@@ -631,6 +647,17 @@ impl<'a> IndexHandler<'a> {
                 let content_len = inscription.content_length().unwrap();
                 let content = inscription.into_body().unwrap();
                 let owner = get_owner(tx, 0).unwrap();
+
+                sender
+                    .send(InscriptionContent {
+                        body: content.clone(),
+                        content_type: content_type.clone(),
+                        inscription_id: InscriptionId {
+                            index: genesis.vout,
+                            txid: genesis.txid,
+                        },
+                    })
+                    .expect("Failed to send inscription content");
 
                 token_cache.parse_token_action(
                     &content_type,
@@ -696,7 +723,7 @@ impl<'a> IndexHandler<'a> {
 
         self.store
             .inscription_db()
-            .write(to_write, super::db::DBFlush::Disable);
+            .write(to_write, super::db::DBFlush::Enable);
 
         Ok(())
     }
@@ -968,7 +995,7 @@ impl<'a> MoveIndexer<'a> {
 
         self.store
             .inscription_db()
-            .write(to_write, super::db::DBFlush::Disable);
+            .write(to_write, super::db::DBFlush::Enable);
 
         Ok(())
     }

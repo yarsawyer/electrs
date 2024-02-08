@@ -13,10 +13,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use electrs::{
-    config::Config,
+    config::{Config, TOKENS_OFFSET},
     daemon::Daemon,
     electrum::RPC as ElectrumRPC,
     errors::*,
+    inscription_entries::inscription::InscriptionContent,
     metrics::Metrics,
     new_index::{
         exchange_data::ExchangeData, precache, schema::InscriptionParseBlock, token::TokenCache,
@@ -24,7 +25,7 @@ use electrs::{
     },
     rest,
     signal::Waiter,
-    util::bincode_util,
+    util::spawn_thread,
     HEIGHT_DELAY,
 };
 
@@ -51,6 +52,15 @@ fn run_server(config: Arc<Config>) -> Result<()> {
     let signal = Waiter::start();
     let metrics = Metrics::new(config.monitoring_addr);
     metrics.start();
+
+    let (sender, receiver) = crossbeam_channel::unbounded::<InscriptionContent>();
+    let sender = Arc::new(sender);
+
+    spawn_thread("inscription_content_receiver", move || {
+        for _ in receiver {
+            // TODO
+        }
+    });
 
     let daemon = Arc::new(Daemon::new(
         config.daemon_dir.clone(),
@@ -84,10 +94,13 @@ fn run_server(config: Arc<Config>) -> Result<()> {
     let ot = indexer.clear_temp(block_offset);
 
     indexer
-        .index_inscription(InscriptionParseBlock::FromToHeight(
-            ot.unwrap_or(config.first_inscription_block as u32),
-            block_offset,
-        ))
+        .index_inscription(
+            InscriptionParseBlock::FromToHeight(
+                ot.unwrap_or(config.first_inscription_block as u32),
+                block_offset,
+            ),
+            sender.clone(),
+        )
         .unwrap();
 
     let inscription_updater = InscriptionUpdater::new(store.clone()).unwrap();
@@ -109,12 +122,13 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             chain.clone(),
             InscriptionParseBlock::FromHeight(ot.unwrap_or(block_offset) + 1, HEIGHT_DELAY),
             &mut token_cache,
+            sender.clone(),
         )
         .unwrap();
 
     store.inscription_db().flush();
 
-    token_cache.process_token_actions(Some(block_offset));
+    token_cache.process_token_actions(Some(tip_height - TOKENS_OFFSET - 1));
     token_cache.write_token_data(store.token_db());
     token_cache.write_valid_transfers(store.token_db());
 
@@ -204,10 +218,11 @@ fn run_server(config: Arc<Config>) -> Result<()> {
                     chain.clone(),
                     InscriptionParseBlock::AtHeight(block),
                     &mut token_cache,
+                    sender.clone(),
                 )
                 .unwrap();
 
-            token_cache.process_token_actions(Some(block - HEIGHT_DELAY - 1));
+            token_cache.process_token_actions(Some(block - TOKENS_OFFSET - 1));
 
             token_cache.write_token_data(store.token_db());
             token_cache.write_valid_transfers(store.token_db());

@@ -14,6 +14,7 @@ pub(crate) const APP_NAME: &str = "mempool-electrs";
 pub(crate) const ELECTRS_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const GIT_HASH: Option<&str> = option_env!("GIT_HASH");
 pub const HEIGHT_DELAY: u32 = 30;
+pub const TOKENS_OFFSET: u32 = 10;
 
 lazy_static! {
     pub(crate) static ref VERSION_STRING: String = {
