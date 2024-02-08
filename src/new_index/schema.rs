@@ -20,7 +20,7 @@ use crate::inscription_entries::inscription::{
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::new_index::inscriptions_updater::{IndexHandler, MoveIndexer};
 use crate::new_index::progress::Progress;
-use crate::new_index::token::TokenCache;
+use crate::new_index::token::{TokenCache, TokenTempAction};
 use crate::rest::{InscriptionMeta, UtxoValue};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
@@ -271,7 +271,6 @@ impl Indexer {
             &PartialTxs::get_temp_iter_key(0),
             &PartialTxs::get_temp_iter_key(remove_blocks_to),
         ) {
-            warn!("Deleting partrial");
             to_delete.push(i.key);
         }
 
@@ -279,7 +278,6 @@ impl Indexer {
             &LastInscriptionNumber::get_temp_db_key(0),
             &LastInscriptionNumber::get_temp_db_key(remove_blocks_to),
         ) {
-            warn!("Deleting last inscription number");
             to_delete.push(i.key);
         }
 
@@ -288,7 +286,6 @@ impl Indexer {
             &InscriptionExtraData::get_temp_db_iter_key(0),
             &InscriptionExtraData::get_temp_db_iter_key(remove_blocks_to),
         ) {
-            warn!("Deleting inscription extra");
             to_delete.push(i.key);
         }
 
@@ -297,8 +294,18 @@ impl Indexer {
             let key = i.key.clone();
             let row = OrdHistoryRow::from_temp_db_row(i).unwrap();
             if row.1 <= remove_blocks_to {
-                warn!("Deleting OrdHistoryRow");
-                warn!("OrdHistoryRow height is {}", row.1);
+                to_delete.push(key);
+            }
+        }
+
+        for i in self
+            .store
+            .temp_db()
+            .iter_scan(&TokenTempAction::get_all_iter_key())
+        {
+            let key = i.key.clone();
+            let (height, _) = TokenTempAction::from_db_row(i);
+            if height <= remove_blocks_to {
                 to_delete.push(key);
             }
         }
@@ -1069,6 +1076,22 @@ impl ChainQuery {
                         inscription_id: key.location.into(),
                         amount: amt,
                     }]);
+            });
+
+        self.store
+            .temp_db()
+            .iter_scan(&TokenTempAction::get_iter_key(&scripthash))
+            .for_each(|x| {
+                let (_, action) = TokenTempAction::from_db_row(x);
+
+                let TransferProto::Bel20 { tick, amt } = action.proto;
+
+                if let Some(amount) = amount_by_tick.get_mut(&tick) {
+                    if amt < amount.0 {
+                        amount.1 += amt;
+                        amount.0 -= amt;
+                    }
+                }
             });
 
         let result = amount_by_tick

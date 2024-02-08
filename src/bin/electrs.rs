@@ -103,7 +103,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         )
         .unwrap();
 
-    update_last_block_number(&store, block_offset);
+    update_last_block_number(config.first_inscription_block, &store, block_offset);
 
     let inscription_updater = InscriptionUpdater::new(store.clone()).unwrap();
 
@@ -207,11 +207,14 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             if !removed.is_empty() {
                 error!("Reorg happened, blocks lenght: {}", removed.len());
                 inscription_updater
-                    .reorg_handler(removed)
+                    .reorg_handler(removed, config.first_inscription_block)
                     .expect("Something went wrong with removing blocks");
             } else {
                 inscription_updater
-                    .remove_temp_data_orhpan(block - HEIGHT_DELAY - 1)
+                    .remove_temp_data_orhpan(
+                        block - HEIGHT_DELAY - 1,
+                        config.first_inscription_block,
+                    )
                     .unwrap();
             }
 

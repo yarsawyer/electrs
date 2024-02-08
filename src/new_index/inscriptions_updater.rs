@@ -22,7 +22,7 @@ use rayon::iter::{
 
 use super::{
     schema::{BlockRow, TxRow},
-    token::{TokenCache, TokensData},
+    token::{TokenCache, TokenTempAction, TokensData},
     DBRow, Store, DB,
 };
 pub struct InscriptionUpdater {
@@ -276,6 +276,7 @@ impl InscriptionUpdater {
                         owner.clone(),
                         genesis,
                         location,
+                        Some(self.store.temp_db()),
                     );
 
                     self.store.inscription_db().write(
@@ -341,7 +342,11 @@ impl InscriptionUpdater {
         Ok(())
     }
 
-    pub fn reorg_handler(&self, blocks: Vec<HeaderEntry>) -> anyhow::Result<()> {
+    pub fn reorg_handler(
+        &self,
+        blocks: Vec<HeaderEntry>,
+        first_inscription_block: usize,
+    ) -> anyhow::Result<()> {
         let mut to_restore = vec![];
 
         let min_height = blocks[0].height() as u32 - 1;
@@ -395,7 +400,7 @@ impl InscriptionUpdater {
         });
 
         for (block_height, txs) in blocks {
-            self.remove_temp_data_orhpan(block_height)?;
+            self.remove_temp_data_orhpan(block_height, first_inscription_block)?;
 
             // Temp db flow
             {
@@ -480,10 +485,14 @@ impl InscriptionUpdater {
         Ok(())
     }
 
-    pub fn remove_temp_data_orhpan(&self, block_height: u32) -> anyhow::Result<()> {
+    pub fn remove_temp_data_orhpan(
+        &self,
+        block_height: u32,
+        first_inscription_block: usize,
+    ) -> anyhow::Result<()> {
         let mut to_delete = vec![];
 
-        update_last_block_number(&self.store, block_height);
+        update_last_block_number(first_inscription_block, &self.store, block_height);
 
         for i in self
             .store
@@ -491,6 +500,18 @@ impl InscriptionUpdater {
             .iter_scan(&PartialTxs::get_temp_iter_key(block_height))
         {
             to_delete.push(i.key);
+        }
+
+        for i in self
+            .store
+            .temp_db()
+            .iter_scan(&TokenTempAction::get_all_iter_key())
+        {
+            let key = i.key.clone();
+            let (height, _) = TokenTempAction::from_db_row(i);
+            if height == block_height {
+                to_delete.push(key);
+            }
         }
 
         to_delete.push(LastInscriptionNumber::get_temp_db_key(block_height));
@@ -669,6 +690,7 @@ impl<'a> IndexHandler<'a> {
                     owner.clone(),
                     genesis,
                     location,
+                    None,
                 );
 
                 let inscription_template = InscriptionTemplate {

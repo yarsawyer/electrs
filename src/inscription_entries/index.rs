@@ -44,3 +44,6 @@ define_prefix! { OWNER_LOCATION_TO_INSCRIPTION, E }
 define_prefix! { TOKEN_TO_DATA, A }
 define_prefix! { ADDRESS_TOKEN_TO_AMOUNT, B }
 define_prefix! { ADDRESS_TICK_LOCATION_TO_TRANSFER, C }
+
+// Temp DB
+define_prefix! { TEMP_TOKEN_ACTIONS, G }

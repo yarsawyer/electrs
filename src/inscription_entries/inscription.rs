@@ -5,6 +5,7 @@ use bitcoin::{hashes::Hash, BlockHash, OutPoint, Txid};
 use itertools::Itertools;
 
 use crate::{
+    config::Config,
     inscription_entries::index::PARTIAL_TXID_TO_TXIDS,
     media::Media,
     new_index::{DBRow, Store},
@@ -858,7 +859,7 @@ pub struct InscriptionContent {
     pub inscription_id: InscriptionId,
 }
 
-pub fn update_last_block_number(store: &Store, block_height: u32) {
+pub fn update_last_block_number(first_inscription_block: usize, store: &Store, block_height: u32) {
     let block_entry = store
         .indexed_headers
         .read()
@@ -877,7 +878,7 @@ pub fn update_last_block_number(store: &Store, block_height: u32) {
                 .unwrap()
                 .height()
         } else {
-            22490
+            first_inscription_block
         }
     };
 

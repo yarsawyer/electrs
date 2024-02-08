@@ -1,6 +1,6 @@
 use super::DB;
 use crate::inscription_entries::index::{
-    ADDRESS_TICK_LOCATION_TO_TRANSFER, ADDRESS_TOKEN_TO_AMOUNT, TOKEN_TO_DATA,
+    ADDRESS_TICK_LOCATION_TO_TRANSFER, ADDRESS_TOKEN_TO_AMOUNT, TEMP_TOKEN_ACTIONS, TOKEN_TO_DATA,
 };
 use crate::inscription_entries::InscriptionId;
 use crate::new_index::DBRow;
@@ -153,6 +153,7 @@ impl TokenCache {
         owner: String,
         genesis: OutPoint,
         location: OutPoint,
+        temp_db: Option<&DB>,
     ) {
         match Self::try_parse(content_type, content) {
             Some(BRC::Deploy { proto }) => {
@@ -164,15 +165,16 @@ impl TokenCache {
                     .push((h, idx, TokenAction::Mint { owner, proto }));
             }
             Some(BRC::Transfer { proto }) => {
-                self.token_actions.push((
-                    h,
-                    idx,
-                    TokenAction::Transfer {
-                        location,
-                        owner,
-                        proto: proto.clone(),
-                    },
-                ));
+                let action = TokenAction::Transfer {
+                    location,
+                    owner,
+                    proto: proto.clone(),
+                };
+                self.token_actions.push((h, idx, action.clone()));
+                if let Some(temp_db) = temp_db {
+                    let row = TokenTempAction::from(action).to_db_row(h);
+                    temp_db.put(&row.key, &row.value);
+                }
                 self.all_transfers.insert(location, proto);
             }
             _ => {}
@@ -438,6 +440,74 @@ impl TokenCache {
 
             token_db.write(transfers, super::db::DBFlush::Enable);
         }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TokenTempAction {
+    location: OutPoint,
+    owner: String,
+    pub proto: TransferProto,
+}
+
+impl From<TokenAction> for TokenTempAction {
+    fn from(value: TokenAction) -> Self {
+        match value {
+            TokenAction::Transfer {
+                location,
+                owner,
+                proto,
+            } => Self {
+                location,
+                owner,
+                proto,
+            },
+            _ => panic!("TokenTempAction can be created only from TokenAction::Transfer"),
+        }
+    }
+}
+
+impl TokenTempAction {
+    fn to_db_row(&self, height: u32) -> DBRow {
+        let key = Self::get_db_key(&self.owner, self.location, height);
+
+        let value = TokenTransferValue {
+            proto: self.proto.clone(),
+        }
+        .to_db_value();
+        DBRow { key, value }
+    }
+
+    pub fn from_db_row(row: DBRow) -> (u32, Self) {
+        let (_, owner, location, height) =
+            bincode_util::deserialize_big::<(String, String, OutPoint, u32)>(&row.key)
+                .expect("Failed to deserialize TokenTempAction key");
+
+        let proto = TokenTransferValue::from_db_value(&row.value).proto;
+
+        (
+            height,
+            Self {
+                location,
+                owner,
+                proto,
+            },
+        )
+    }
+
+    pub fn get_iter_key(owner: &str) -> Vec<u8> {
+        bincode_util::serialize_big(&(TEMP_TOKEN_ACTIONS, owner))
+            .expect("Failed to serialize TokenTempAction iter key")
+    }
+
+    fn get_db_key(owner: &str, location: OutPoint, height: u32) -> Vec<u8> {
+        bincode_util::serialize_big(&(TEMP_TOKEN_ACTIONS, owner, location, height))
+            .expect("Failed to serialize TokenTempAction key")
+    }
+
+    pub fn get_all_iter_key() -> Vec<u8> {
+        bincode_util::serialize_big(&(TEMP_TOKEN_ACTIONS))
+            .expect("Failed to serialize TokenTempAction global iter key")
     }
 }
 
