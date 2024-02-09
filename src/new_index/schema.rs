@@ -11,7 +11,7 @@ use bitcoin::consensus::encode::{deserialize, serialize};
 use crate::chain::{
     BlockHash, BlockHeader, Network, OutPoint, Script, Transaction, TxOut, Txid, Value,
 };
-use crate::config::Config;
+use crate::config::{Config, TOKENS_OFFSET};
 use crate::daemon::Daemon;
 use crate::inscription_entries::inscription::{
     update_last_block_number, InscriptionContent, InscriptionExtraData, InscriptionExtraDataValue,
@@ -305,13 +305,10 @@ impl Indexer {
         {
             let key = i.key.clone();
             let (height, _) = TokenTempAction::from_db_row(i);
-            if height <= remove_blocks_to {
+            if height <= remove_blocks_to + HEIGHT_DELAY - TOKENS_OFFSET {
                 to_delete.push(key);
             }
         }
-
-        warn!("To clear: {}", to_delete.len());
-        warn!("block_d: {}", block_d);
 
         if to_delete.is_empty() {
             return Some(last_number);
@@ -387,7 +384,6 @@ impl Indexer {
             .iter()
             .map(|x| self.get_block_height(*x).unwrap())
             .collect_vec();
-        warn!("Blocks: {:?}", blocks_numbers);
 
         if let Some(block_hash) = blocks.last() {
             let block_number = self.get_block_height(*block_hash).unwrap();
@@ -407,18 +403,20 @@ impl Indexer {
 
             let block_number = self.get_block_height(*b_hash).unwrap();
 
+            inscription_updater
+                .remove_temp_data_orhpan(
+                    block_number as u32 - HEIGHT_DELAY - 1,
+                    first_inscription_block,
+                )
+                .unwrap();
+
             let txos = load_txos(&self.store.txstore_db, &txs);
 
             let keys = txos
                 .iter()
                 .map(|(outpoint, v)| {
                     TokenTransferKey::db_key(
-                        &v.script_pubkey
-                            .to_address_str(Network::Bellscoin)
-                            .unwrap_or_else(|| {
-                                error!("{}", outpoint);
-                                panic!("Failed to get address")
-                            }),
+                        &v.script_pubkey.to_address_str(Network::Bellscoin).unwrap(),
                         outpoint.clone(),
                     )
                 })
@@ -1016,12 +1014,6 @@ impl ChainQuery {
                     unreachable!();
                 }
             };
-
-            // abort if the utxo set size excedees the limit at any point in time
-            // if utxos.len() > limit {
-            //     // bail!(ErrorKind::TooPopular)
-            //     break;
-            // }
         }
 
         Ok((utxos, lastblock, processed_items))
@@ -1048,12 +1040,6 @@ impl ChainQuery {
                     stats.count += 1;
                     stats.amount += i.value;
                 }
-
-                // if let Ok(row) = stats.to_db_row(&address) {
-                //     self.store()
-                //         .inscription_db()
-                //         .write(vec![row], DBFlush::Disable);
-                // }
 
                 stats
             }))
@@ -1100,7 +1086,7 @@ impl ChainQuery {
             .temp_db()
             .iter_scan(&TokenTempAction::get_iter_key(&scripthash))
             .for_each(|x| {
-                let (_, action) = TokenTempAction::from_db_row(x);
+                let (block_height, action) = TokenTempAction::from_db_row(x);
 
                 let TransferProto::Bel20 { tick, amt } = action.proto;
 

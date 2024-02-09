@@ -297,24 +297,23 @@ impl TokenCache {
     }
 
     pub fn process_token_actions(&mut self, height: Option<u32>) {
-        // We should sort token actions before processing them.
         self.token_actions
             .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-        let max_idx = if let Some(height) = height {
+
+        let token_actions = if let Some(height) = height {
             let mut res = None;
             for (i, (h, _, _)) in self.token_actions.iter().enumerate() {
-                if *h > height {
+                if *h <= height {
                     res = Some(i);
+                } else {
                     break;
                 }
             }
-            res
-        } else {
-            None
-        };
-
-        let token_actions = if let Some(max_idx) = max_idx {
-            self.token_actions.drain(..=max_idx)
+            if let Some(res) = res {
+                self.token_actions.drain(..=res)
+            } else {
+                self.token_actions.drain(0..0)
+            }
         } else {
             self.token_actions.drain(..)
         };
@@ -522,7 +521,7 @@ impl TokenTempAction {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum TokenAction {
     // Deploy new token action.
     Deploy {
@@ -694,7 +693,7 @@ pub struct TokenBalance {
     pub transfers: Vec<TokenTransfer>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TokenTransfer {
     pub inscription_id: InscriptionId,
     pub amount: u64,

@@ -894,15 +894,16 @@ pub fn update_last_block_number(
                 .indexed_headers
                 .read()
                 .header_by_blockhash(&prev_hash)
-                .anyhow_as("Header by blockhash not found")?
-                .height()
+                .map(|x| x.height())
         } else {
-            first_inscription_block
+            Some(first_inscription_block)
         }
     };
 
-    if prev_block_height < block_height as usize {
-        db.put(b"ot", &block_entry.into_inner());
+    if let Some(prev_block_height) = prev_block_height {
+        if prev_block_height < block_height as usize {
+            db.put(b"ot", &block_entry.into_inner());
+        }
     }
 
     Ok(())

@@ -2,6 +2,7 @@ use core::panic;
 use std::{collections::HashMap, convert::TryInto, sync::Arc};
 
 use crate::{
+    config::TOKENS_OFFSET,
     inscription_entries::{
         index::PARTIAL_TXID_TO_TXIDS,
         inscription::{
@@ -12,6 +13,7 @@ use crate::{
     },
     new_index::{schema::TxOutRow, token::TransferProto},
     util::{bincode_util, errors::AsAnyhow, full_hash, HeaderEntry, ScriptToAddr},
+    HEIGHT_DELAY,
 };
 use anyhow::{Ok, Result};
 use bitcoin::{consensus::Decodable, hashes::Hash, BlockHash, OutPoint, TxOut};
@@ -335,8 +337,6 @@ impl InscriptionUpdater {
 
         to_write.push(last_number.to_temp_db_row(next_block_height)?);
 
-        warn!("Copied {} entries from main block", to_write.len());
-
         self.store
             .temp_db()
             .write(to_write, super::db::DBFlush::Disable);
@@ -365,20 +365,7 @@ impl InscriptionUpdater {
                 })
                 .unwrap()
             })
-            .unwrap_or_else(|| {
-                let all_last_numbers_heights = self
-                    .store
-                    .temp_db()
-                    .iter_scan(&LastInscriptionNumber::temp_iter_db_key())
-                    .map(LastInscriptionNumber::from_temp_db_row)
-                    .map(|x| x.0)
-                    .collect_vec();
-                error!("All last numbers: {:?}", all_last_numbers_heights);
-                panic!(
-                    "Failed to find last inscription number at height {}",
-                    min_height
-                )
-            });
+            .expect("Failed to find last inscription number");
 
         to_restore.push(last_number.to_db()?);
 
@@ -524,7 +511,7 @@ impl InscriptionUpdater {
         {
             let key = i.key.clone();
             let (height, _) = TokenTempAction::from_db_row(i);
-            if height <= block_height {
+            if height <= block_height + HEIGHT_DELAY - TOKENS_OFFSET {
                 to_delete.push(key);
             }
         }
@@ -539,11 +526,6 @@ impl InscriptionUpdater {
     pub fn copy_to_next_block(&self, current_block_height: u32) -> anyhow::Result<()> {
         let next_block_height = current_block_height + 1;
         let mut to_write = vec![];
-
-        warn!(
-            "Coping to next block {} -> {}",
-            current_block_height, next_block_height
-        );
 
         for i in self
             .store

@@ -207,17 +207,12 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             let block = store.get_block_height(indexed_tip).unwrap() as u32;
 
             if !removed.is_empty() {
+                let first_height = removed.first().unwrap().height() as u32;
                 error!("Reorg happened, blocks lenght: {}", removed.len());
                 inscription_updater
                     .reorg_handler(removed, config.first_inscription_block)
                     .expect("Something went wrong with removing blocks");
-            } else {
-                inscription_updater
-                    .remove_temp_data_orhpan(
-                        block - HEIGHT_DELAY - 1,
-                        config.first_inscription_block,
-                    )
-                    .unwrap();
+                inscription_updater.copy_to_next_block(first_height - 1 as u32)?;
             }
 
             indexer
