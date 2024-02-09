@@ -79,8 +79,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &metrics,
     );
 
-    let (mut tip, _) = indexer.update(&daemon)?;
-    let tip_height = store.get_block_height(tip).unwrap() as u32;
+    let (mut tip, _, _) = indexer.update(&daemon)?;
 
     let chain = Arc::new(ChainQuery::new(
         Arc::clone(&store),
@@ -88,6 +87,8 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         &config,
         &metrics,
     ));
+
+    let tip_height = store.get_block_height(tip).unwrap() as u32;
 
     let block_offset = tip_height - HEIGHT_DELAY - 1;
 
@@ -200,10 +201,10 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         // Index new blocks
         let current_tip = daemon.getbestblockhash()?;
         if current_tip != tip {
-            let (_, removed) = indexer.update(&daemon)?;
+            let (indexed_tip, new_length, removed) = indexer.update(&daemon)?;
 
-            tip = current_tip;
-            let block = store.get_block_height(tip).unwrap() as u32;
+            tip = indexed_tip;
+            let block = store.get_block_height(indexed_tip).unwrap() as u32;
 
             if !removed.is_empty() {
                 error!("Reorg happened, blocks lenght: {}", removed.len());
@@ -222,7 +223,10 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             indexer
                 .index_temp(
                     chain.clone(),
-                    InscriptionParseBlock::AtHeight(block),
+                    InscriptionParseBlock::FromHeight(
+                        block - new_length as u32 + 1,
+                        new_length as u32,
+                    ),
                     &mut token_cache,
                     sender.clone(),
                     config.first_inscription_block,

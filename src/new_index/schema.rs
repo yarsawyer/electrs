@@ -574,12 +574,13 @@ impl Indexer {
         Ok(result)
     }
 
-    pub fn update(&mut self, daemon: &Daemon) -> Result<(BlockHash, Vec<HeaderEntry>)> {
+    pub fn update(&mut self, daemon: &Daemon) -> Result<(BlockHash, usize, Vec<HeaderEntry>)> {
         let daemon = daemon.reconnect()?;
         let tip = daemon.getbestblockhash()?;
         let new_headers = self.get_new_headers(&daemon, &tip)?;
 
         let to_add = self.headers_to_add(&new_headers);
+        let to_add_len = to_add.len();
 
         debug!(
             "adding transactions from {} blocks using {:?}",
@@ -619,7 +620,7 @@ impl Indexer {
 
         self.tip_metric.set(headers.len() as i64 - 1);
 
-        Ok((tip, removed))
+        Ok((tip, to_add_len, removed))
     }
 
     fn add(&self, blocks: &[BlockEntry]) {
