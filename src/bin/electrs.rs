@@ -104,7 +104,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         )
         .unwrap();
 
-    update_last_block_number(config.first_inscription_block, &store, block_offset, false);
+    update_last_block_number(config.first_inscription_block, &store, block_offset, false)?;
 
     let inscription_updater = InscriptionUpdater::new(store.clone()).unwrap();
 

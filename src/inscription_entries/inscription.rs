@@ -873,7 +873,7 @@ pub fn update_last_block_number(
     store: &Store,
     block_height: u32,
     is_temp: bool,
-) {
+) -> anyhow::Result<()> {
     let db = match is_temp {
         true => store.temp_db(),
         false => store.inscription_db(),
@@ -883,18 +883,18 @@ pub fn update_last_block_number(
         .indexed_headers
         .read()
         .header_by_height(block_height as usize)
-        .unwrap()
+        .anyhow_as("Header by height not found")?
         .hash()
         .clone();
 
     let prev_block_height = {
         if let Some(ot) = db.get(b"ot") {
-            let prev_hash = BlockHash::from_slice(&ot).unwrap();
+            let prev_hash = BlockHash::from_slice(&ot)?;
             store
                 .indexed_headers
                 .read()
                 .header_by_blockhash(&prev_hash)
-                .unwrap()
+                .anyhow_as("Header by blockhash not found")?
                 .height()
         } else {
             first_inscription_block
@@ -904,4 +904,6 @@ pub fn update_last_block_number(
     if prev_block_height < block_height as usize {
         db.put(b"ot", &block_entry.into_inner());
     }
+
+    Ok(())
 }

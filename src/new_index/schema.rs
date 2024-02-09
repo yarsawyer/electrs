@@ -397,7 +397,7 @@ impl Indexer {
                 &self.store,
                 block_number as u32,
                 true,
-            );
+            )?;
         }
 
         for b_hash in &blocks {

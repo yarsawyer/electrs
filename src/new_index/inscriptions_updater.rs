@@ -507,7 +507,7 @@ impl InscriptionUpdater {
     ) -> anyhow::Result<()> {
         let mut to_delete = vec![];
 
-        update_last_block_number(first_inscription_block, &self.store, block_height, false);
+        update_last_block_number(first_inscription_block, &self.store, block_height, false)?;
 
         for i in self
             .store
