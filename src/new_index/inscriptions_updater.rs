@@ -1,3 +1,4 @@
+use core::panic;
 use std::{collections::HashMap, convert::TryInto, sync::Arc};
 
 use crate::{
@@ -19,6 +20,7 @@ use itertools::Itertools;
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
+use tokio::sync::watch::error;
 
 use super::{
     schema::{BlockRow, TxRow},
@@ -243,7 +245,6 @@ impl InscriptionUpdater {
                         OrdHistoryValue {
                             inscription_id: og_inscription_id,
                             inscription_number,
-                            value: tx.output[0].value,
                         },
                     );
 
@@ -258,6 +259,7 @@ impl InscriptionUpdater {
                         inscription.content_length().unwrap(),
                         inscription_number,
                         0,
+                        tx.output[0].value,
                     );
 
                     sender
@@ -349,7 +351,7 @@ impl InscriptionUpdater {
     ) -> anyhow::Result<()> {
         let mut to_restore = vec![];
 
-        let min_height = blocks[0].height() as u32 - 1;
+        let min_height = blocks.iter().map(|x| x.height()).min().unwrap() as u32 - 1;
 
         let last_inscription_number_key = LastInscriptionNumber::get_temp_db_key(min_height);
         let last_number = self
@@ -363,7 +365,20 @@ impl InscriptionUpdater {
                 })
                 .unwrap()
             })
-            .unwrap();
+            .unwrap_or_else(|| {
+                let all_last_numbers_heights = self
+                    .store
+                    .temp_db()
+                    .iter_scan(&LastInscriptionNumber::temp_iter_db_key())
+                    .map(LastInscriptionNumber::from_temp_db_row)
+                    .map(|x| x.0)
+                    .collect_vec();
+                error!("All last numbers: {:?}", all_last_numbers_heights);
+                panic!(
+                    "Failed to find last inscription number at height {}",
+                    min_height
+                )
+            });
 
         to_restore.push(last_number.to_db()?);
 
@@ -492,7 +507,7 @@ impl InscriptionUpdater {
     ) -> anyhow::Result<()> {
         let mut to_delete = vec![];
 
-        update_last_block_number(first_inscription_block, &self.store, block_height);
+        update_last_block_number(first_inscription_block, &self.store, block_height, false);
 
         for i in self
             .store
@@ -509,7 +524,7 @@ impl InscriptionUpdater {
         {
             let key = i.key.clone();
             let (height, _) = TokenTempAction::from_db_row(i);
-            if height == block_height {
+            if height <= block_height {
                 to_delete.push(key);
             }
         }
@@ -524,6 +539,11 @@ impl InscriptionUpdater {
     pub fn copy_to_next_block(&self, current_block_height: u32) -> anyhow::Result<()> {
         let next_block_height = current_block_height + 1;
         let mut to_write = vec![];
+
+        warn!(
+            "Coping to next block {} -> {}",
+            current_block_height, next_block_height
+        );
 
         for i in self
             .store
@@ -726,7 +746,6 @@ impl<'a> IndexHandler<'a> {
                         index: genesis.vout,
                     },
                     inscription_number: inc.inscription_number,
-                    value: inc.value,
                 },
             );
 
@@ -739,6 +758,7 @@ impl<'a> IndexHandler<'a> {
                 inc.content_len,
                 inc.inscription_number,
                 inc.offset,
+                inc.value,
             );
 
             to_write.push(new_row.into_row());
@@ -950,6 +970,7 @@ impl<'a> MoveIndexer<'a> {
                     };
 
                     inc.data.value.offset = offset;
+                    inc.data.value.value = tx.output[vout as usize].value;
                     let location = OutPoint {
                         txid: tx.txid(),
                         vout,
@@ -990,7 +1011,7 @@ impl<'a> MoveIndexer<'a> {
                 inc.data.value.owner = "leaked 😭".to_owned();
             }
 
-            let prev_history_value = {
+            let mut prev_history_value = {
                 self.store
                     .inscription_db()
                     .db

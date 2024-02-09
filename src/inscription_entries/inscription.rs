@@ -5,7 +5,6 @@ use bitcoin::{hashes::Hash, BlockHash, OutPoint, Txid};
 use itertools::Itertools;
 
 use crate::{
-    config::Config,
     inscription_entries::index::PARTIAL_TXID_TO_TXIDS,
     media::Media,
     new_index::{DBRow, Store},
@@ -45,7 +44,6 @@ pub struct OrdHistoryKey {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OrdHistoryValue {
-    pub value: u64,
     pub inscription_number: u64,
     pub inscription_id: InscriptionId,
 }
@@ -122,10 +120,6 @@ impl OrdHistoryRow {
 
     pub fn get_outpoint(&self) -> OutPoint {
         self.key.outpoint
-    }
-
-    pub fn get_value(&self) -> u64 {
-        self.value.value
     }
 
     pub fn get_address(&self) -> String {
@@ -296,6 +290,7 @@ pub struct InscriptionExtraDataValue {
     pub content_length: usize,
     pub number: u64,
     pub offset: u64,
+    pub value: u64,
 }
 
 impl InscriptionExtraDataValue {
@@ -323,6 +318,7 @@ impl InscriptionExtraData {
         content_length: usize,
         number: u64,
         offset: u64,
+        value: u64,
     ) -> Self {
         Self {
             location,
@@ -334,6 +330,7 @@ impl InscriptionExtraData {
                 content_type,
                 number,
                 offset,
+                value,
             },
         }
     }
@@ -845,6 +842,18 @@ impl LastInscriptionNumber {
         bincode_util::serialize_big(&(INSCRIPTION_NUMBER, block_height)).unwrap()
     }
 
+    pub fn temp_iter_db_key() -> Vec<u8> {
+        bincode_util::serialize_big(&(INSCRIPTION_NUMBER)).unwrap()
+    }
+
+    pub fn from_temp_db_row(row: DBRow) -> (u32, Self) {
+        let (_, height) = bincode_util::deserialize_big::<(String, _)>(&row.key)
+            .expect("Cannot deserialize LastInscriptionNumber");
+        let number: u64 = bincode_util::deserialize_big(&row.value)
+            .expect("Cannot deserialize LastInscriptionNumber");
+        (height, Self { number })
+    }
+
     pub fn to_temp_db_row(&self, block_height: u32) -> anyhow::Result<DBRow> {
         Ok(DBRow {
             key: Self::get_temp_db_key(block_height),
@@ -859,7 +868,17 @@ pub struct InscriptionContent {
     pub inscription_id: InscriptionId,
 }
 
-pub fn update_last_block_number(first_inscription_block: usize, store: &Store, block_height: u32) {
+pub fn update_last_block_number(
+    first_inscription_block: usize,
+    store: &Store,
+    block_height: u32,
+    is_temp: bool,
+) {
+    let db = match is_temp {
+        true => store.temp_db(),
+        false => store.inscription_db(),
+    };
+
     let block_entry = store
         .indexed_headers
         .read()
@@ -869,7 +888,7 @@ pub fn update_last_block_number(first_inscription_block: usize, store: &Store, b
         .clone();
 
     let prev_block_height = {
-        if let Some(ot) = store.inscription_db().get(b"ot") {
+        if let Some(ot) = db.get(b"ot") {
             let prev_hash = BlockHash::from_slice(&ot).unwrap();
             store
                 .indexed_headers
@@ -883,7 +902,6 @@ pub fn update_last_block_number(first_inscription_block: usize, store: &Store, b
     };
 
     if prev_block_height < block_height as usize {
-        error!("Writing last block number {block_height}");
-        store.inscription_db().put(b"ot", &block_entry.into_inner());
+        db.put(b"ot", &block_entry.into_inner());
     }
 }

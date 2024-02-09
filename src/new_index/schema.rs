@@ -14,8 +14,8 @@ use crate::chain::{
 use crate::config::Config;
 use crate::daemon::Daemon;
 use crate::inscription_entries::inscription::{
-    InscriptionContent, InscriptionExtraData, InscriptionExtraDataValue, LastInscriptionNumber,
-    OrdHistoryRow, PartialTxs, UserOrdStats,
+    update_last_block_number, InscriptionContent, InscriptionExtraData, InscriptionExtraDataValue,
+    LastInscriptionNumber, OrdHistoryRow, PartialTxs, UserOrdStats,
 };
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::new_index::inscriptions_updater::{IndexHandler, MoveIndexer};
@@ -143,7 +143,7 @@ impl Store {
 }
 
 type UtxoMap = HashMap<OutPoint, (BlockId, Value, Option<String>)>;
-type UtxoVec = Vec<(OutPoint, (BlockId, Value, Option<String>))>;
+type UtxoVec = Vec<(OutPoint, (BlockId, Option<String>))>;
 
 #[derive(Debug)]
 pub struct Utxo {
@@ -257,7 +257,7 @@ impl Indexer {
     pub fn clear_temp(&self, block_height: u32) -> Option<u32> {
         let last_number = self
             .store
-            .inscription_db()
+            .temp_db()
             .get(b"ot")
             .map(|x| BlockHash::from_slice(&x).unwrap())
             .map(|x| self.get_block_height(x))
@@ -379,9 +379,26 @@ impl Indexer {
         block: InscriptionParseBlock,
         token_cache: &mut TokenCache,
         sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
+        first_inscription_block: usize,
     ) -> anyhow::Result<()> {
         let inscription_updater = InscriptionUpdater::new(self.store.clone()).anyhow()?;
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
+        let blocks_numbers = blocks
+            .iter()
+            .map(|x| self.get_block_height(*x).unwrap())
+            .collect_vec();
+        warn!("Blocks: {:?}", blocks_numbers);
+
+        if let Some(block_hash) = blocks.last() {
+            let block_number = self.get_block_height(*block_hash).unwrap();
+
+            update_last_block_number(
+                first_inscription_block,
+                &self.store,
+                block_number as u32,
+                true,
+            );
+        }
 
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
@@ -1134,14 +1151,16 @@ impl ChainQuery {
                     content_type: x.content_type,
                     inscription_id: x.genesis.into(),
                     inscription_number: x.number,
+                    value: x.value,
+                    offset: x.offset,
                 })
         };
 
-        for ((outpoint, (blockid, value, owner)), extra) in newutxos.into_iter().zip(extras) {
+        for ((outpoint, (blockid, owner)), extra) in newutxos.into_iter().zip(extras) {
             values.push(Utxo {
                 txid: outpoint.txid,
                 vout: outpoint.vout,
-                value,
+                value: extra.value,
                 confirmed: Some(blockid),
                 inscription_meta: Some(extra),
                 owner,
@@ -1166,7 +1185,7 @@ impl ChainQuery {
         for (history, blockid) in history_iter {
             utxos.push((
                 history.get_outpoint(),
-                (blockid, history.get_value(), Some(history.get_address())),
+                (blockid, Some(history.get_address())),
             ));
 
             if utxos.len() == limit {

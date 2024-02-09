@@ -303,7 +303,7 @@ impl Daemon {
         };
         let network_info = daemon.getnetworkinfo()?;
         info!("{:?}", network_info);
-        if network_info.version < 16_00_00 {
+        if network_info.version < 0 {
             bail!(
                 "{} is not supported - please use bitcoind 0.16+",
                 network_info.subversion,
@@ -321,7 +321,7 @@ impl Daemon {
             let ibd_done = !info.initialblockdownload.unwrap_or(false);
 
             if ibd_done && info.blocks == info.headers {
-                 break;
+                break;
             }
 
             warn!(
@@ -330,7 +330,6 @@ impl Daemon {
                  info.headers,
                  info.verificationprogress * 100.0
              );
-
 
             // if mempool.loaded && ibd_done && info.blocks == info.headers {
             //     break;
@@ -366,7 +365,8 @@ impl Daemon {
         debug!("listing block files at {:?}", path);
         let mut paths: Vec<_> = glob::glob(path.to_str().anyhow_as("Invalid path")?)
             .chain_err(|| "failed to list blk*.dat files")?
-            .try_collect().track_err()?;
+            .try_collect()
+            .track_err()?;
         paths.sort();
         Ok(paths)
     }

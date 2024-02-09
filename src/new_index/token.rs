@@ -443,7 +443,7 @@ impl TokenCache {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct TokenTempAction {
     location: OutPoint,
     owner: String,
@@ -479,9 +479,14 @@ impl TokenTempAction {
     }
 
     pub fn from_db_row(row: DBRow) -> (u32, Self) {
-        let (_, owner, location, height) =
-            bincode_util::deserialize_big::<(String, String, OutPoint, u32)>(&row.key)
+        let (_, owner, txid, vout, height) =
+            bincode_util::deserialize_big::<(String, String, [u8; 32], u32, u32)>(&row.key)
                 .expect("Failed to deserialize TokenTempAction key");
+
+        let location = OutPoint {
+            txid: Txid::from_slice(txid.as_slice()).unwrap(),
+            vout,
+        };
 
         let proto = TokenTransferValue::from_db_value(&row.value).proto;
 
@@ -501,8 +506,14 @@ impl TokenTempAction {
     }
 
     fn get_db_key(owner: &str, location: OutPoint, height: u32) -> Vec<u8> {
-        bincode_util::serialize_big(&(TEMP_TOKEN_ACTIONS, owner, location, height))
-            .expect("Failed to serialize TokenTempAction key")
+        bincode_util::serialize_big(&(
+            TEMP_TOKEN_ACTIONS,
+            owner,
+            location.txid.into_inner(),
+            location.vout,
+            height,
+        ))
+        .expect("Failed to serialize TokenTempAction key")
     }
 
     pub fn get_all_iter_key() -> Vec<u8> {

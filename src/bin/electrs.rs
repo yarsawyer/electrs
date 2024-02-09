@@ -103,7 +103,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         )
         .unwrap();
 
-    update_last_block_number(config.first_inscription_block, &store, block_offset);
+    update_last_block_number(config.first_inscription_block, &store, block_offset, false);
 
     let inscription_updater = InscriptionUpdater::new(store.clone()).unwrap();
 
@@ -122,9 +122,10 @@ fn run_server(config: Arc<Config>) -> Result<()> {
     indexer
         .index_temp(
             chain.clone(),
-            InscriptionParseBlock::FromHeight(ot.unwrap_or(block_offset) + 1, HEIGHT_DELAY),
+            InscriptionParseBlock::FromHeight(ot.unwrap_or(block_offset) + 1, HEIGHT_DELAY + 1),
             &mut token_cache,
             sender.clone(),
+            config.first_inscription_block,
         )
         .unwrap();
 
@@ -224,6 +225,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
                     InscriptionParseBlock::AtHeight(block),
                     &mut token_cache,
                     sender.clone(),
+                    config.first_inscription_block,
                 )
                 .unwrap();
 
@@ -239,8 +241,6 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         // Update subscribed clients
         electrum_server.notify();
     }
-
-    dbg!(serde_json::to_vec(&token_cache).unwrap().len());
 
     store
         .temp_db()
