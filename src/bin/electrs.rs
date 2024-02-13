@@ -7,6 +7,7 @@ extern crate tracing;
 
 extern crate electrs;
 
+use bitcoin::{hashes::Hash, BlockHash};
 use error_chain::ChainedError;
 use std::process;
 use std::sync::Arc;
@@ -90,27 +91,39 @@ fn run_server(config: Arc<Config>) -> Result<()> {
 
     let tip_height = store.get_block_height(tip).unwrap() as u32;
 
-    let block_offset = tip_height - HEIGHT_DELAY - 1;
+    let temp_offset = tip_height - HEIGHT_DELAY - 1;
 
-    let ot = indexer.clear_temp(block_offset);
+    let temp_ot = {
+        if let Some(ot) = indexer.clear_temp(temp_offset) {
+            if tip_height - ot > HEIGHT_DELAY {
+                temp_offset
+            } else {
+                ot
+            }
+        } else {
+            temp_offset
+        }
+    } + 2;
+
+    let ot = store
+        .inscription_db()
+        .get(b"ot")
+        .map(|x| BlockHash::from_slice(&x).unwrap())
+        .map(|x| store.get_block_height(x).unwrap())
+        .unwrap_or(config.first_inscription_block);
 
     indexer
         .index_inscription(
-            InscriptionParseBlock::FromToHeight(
-                ot.unwrap_or(config.first_inscription_block as u32),
-                block_offset,
-            ),
+            InscriptionParseBlock::FromToHeight(ot as u32, temp_offset),
             sender.clone(),
         )
         .unwrap();
 
-    update_last_block_number(config.first_inscription_block, &store, block_offset, false)?;
+    update_last_block_number(config.first_inscription_block, &store, temp_offset, false)?;
 
     let inscription_updater = InscriptionUpdater::new(store.clone()).unwrap();
 
-    inscription_updater
-        .copy_from_main_block(block_offset)
-        .unwrap();
+    inscription_updater.copy_from_main_block(temp_ot).unwrap();
 
     let mut token_cache = {
         if let Some(parsed) = store.temp_db().remove("tc".as_bytes()) {
@@ -122,8 +135,9 @@ fn run_server(config: Arc<Config>) -> Result<()> {
 
     indexer
         .index_temp(
+            &inscription_updater,
             chain.clone(),
-            InscriptionParseBlock::FromHeight(ot.unwrap_or(block_offset) + 1, HEIGHT_DELAY + 1),
+            InscriptionParseBlock::FromHeight(temp_ot, HEIGHT_DELAY),
             &mut token_cache,
             sender.clone(),
             config.first_inscription_block,
@@ -217,6 +231,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
 
             indexer
                 .index_temp(
+                    &inscription_updater,
                     chain.clone(),
                     InscriptionParseBlock::FromHeight(
                         block - new_length as u32 + 1,

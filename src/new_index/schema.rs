@@ -254,7 +254,7 @@ impl Indexer {
         }
     }
 
-    pub fn clear_temp(&self, block_height: u32) -> Option<u32> {
+    pub fn clear_temp(&self, remove_blocks_to: u32) -> Option<u32> {
         let last_number = self
             .store
             .temp_db()
@@ -264,8 +264,6 @@ impl Indexer {
             .flatten()? as u32;
 
         let mut to_delete = vec![];
-        let block_d = block_height - last_number;
-        let remove_blocks_to = block_height;
 
         for i in self.store.temp_db().iter_scan_reverse(
             &PartialTxs::get_temp_iter_key(0),
@@ -372,25 +370,14 @@ impl Indexer {
 
     pub fn index_temp(
         &self,
+        inscription_updater: &InscriptionUpdater,
         chain: Arc<ChainQuery>,
         block: InscriptionParseBlock,
         token_cache: &mut TokenCache,
         sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
         first_inscription_block: usize,
     ) -> anyhow::Result<()> {
-        let inscription_updater = InscriptionUpdater::new(self.store.clone()).anyhow()?;
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
-
-        if let Some(block_hash) = blocks.last() {
-            let block_number = self.get_block_height(*block_hash).unwrap();
-
-            update_last_block_number(
-                first_inscription_block,
-                &self.store,
-                block_number as u32,
-                true,
-            )?;
-        }
 
         for b_hash in &blocks {
             let Some(txs) = chain.get_block_txs(b_hash) else {
@@ -408,41 +395,41 @@ impl Indexer {
 
             let txos = load_txos(&self.store.txstore_db, &txs);
 
-            let keys = txos
-                .iter()
-                .map(|(outpoint, v)| {
-                    TokenTransferKey::db_key(
-                        &v.script_pubkey.to_address_str(Network::Bellscoin).unwrap(),
-                        outpoint.clone(),
-                    )
-                })
-                .collect_vec();
+            {
+                let keys = txos
+                    .iter()
+                    .map(|(outpoint, v)| {
+                        TokenTransferKey::db_key(
+                            &v.script_pubkey.to_address_str(Network::Bellscoin).unwrap(),
+                            outpoint.clone(),
+                        )
+                    })
+                    .collect_vec();
 
-            let valid_transfers = self
-                .store
-                .token_db()
-                .db
-                .multi_get(keys.iter())
-                .into_iter()
-                .enumerate()
-                .map(|(idx, v)| {
-                    if let Ok(v) = v {
-                        if let Some(v) = v {
-                            let key = TokenTransferKey::parse_db_key(keys[idx].clone());
-                            let value = TokenTransferValue::from_db_value(&v);
-                            Some((key.location, (key.owner, value.proto)))
+                let valid_transfers = self
+                    .store
+                    .token_db()
+                    .db
+                    .multi_get(keys.iter())
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, v)| {
+                        if let Ok(v) = v {
+                            if let Some(v) = v {
+                                let key = TokenTransferKey::parse_db_key(keys[idx].clone());
+                                let value = TokenTransferValue::from_db_value(&v);
+                                Some((key.location, (key.owner, value.proto)))
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
-                    } else {
-                        None
-                    }
-                })
-                .flatten();
+                    })
+                    .flatten();
 
-            token_cache.valid_transfers.extend(valid_transfers);
-
-            drop(keys);
+                token_cache.valid_transfers.extend(valid_transfers);
+            }
 
             let txos = txos.into_iter().map(|x| (x.0, x.1)).collect();
 
@@ -462,6 +449,17 @@ impl Indexer {
             inscription_updater
                 .copy_to_next_block(block_number as u32)
                 .anyhow()?;
+        }
+
+        if let Some(block_hash) = blocks.last() {
+            let block_number = self.get_block_height(*block_hash).unwrap();
+
+            update_last_block_number(
+                first_inscription_block,
+                &self.store,
+                block_number as u32,
+                true,
+            )?;
         }
 
         Ok(())
@@ -492,9 +490,9 @@ impl Indexer {
 
         let mut token_cache = TokenCache::default();
 
-        let progress = Progress::begin("Indexing inscriptions blocks", blocks.len() as u64, 0);
-
         {
+            let progress = Progress::begin("Indexing inscriptions blocks", blocks.len() as u64, 0);
+
             for blocks_chunk in blocks.into_iter().chunks(CHUNK_SIZE).into_iter() {
                 let chunked = indexer.load_blocks_chunks(blocks_chunk.collect_vec());
 
@@ -517,8 +515,6 @@ impl Indexer {
                 progress.inc(CHUNK_SIZE as u64);
             }
         }
-
-        drop(progress);
 
         indexer.write_partials().unwrap();
         indexer.write_inscription_number().unwrap();
@@ -1084,7 +1080,7 @@ impl ChainQuery {
             .temp_db()
             .iter_scan(&TokenTempAction::get_iter_key(&scripthash))
             .for_each(|x| {
-                let (block_height, action) = TokenTempAction::from_db_row(x);
+                let (_, action) = TokenTempAction::from_db_row(x);
 
                 let TransferProto::Bel20 { tick, amt } = action.proto;
 

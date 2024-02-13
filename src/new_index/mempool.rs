@@ -314,14 +314,17 @@ impl Mempool {
         let old_txids = HashSet::from_iter(self.txstore.keys().cloned());
         let to_remove: HashSet<&Txid> = old_txids.difference(&new_txids).collect();
 
-        let mut partials_to_remove = Vec::new();
+        let mut partials_to_remove = HashMap::<Txid, Vec<Txid>>::new();
 
         to_remove.iter().for_each(|&x| {
             self.remove_inscriptions_by_txid(x);
 
             for (txid, txs) in self.patrials.iter() {
                 if txs.iter().any(|tx| tx.txid() == *x) {
-                    partials_to_remove.push((*txid, *x));
+                    partials_to_remove
+                        .entry(*txid)
+                        .and_modify(|v| v.push(*x))
+                        .or_insert(vec![*x]);
                 }
             }
         });
@@ -332,8 +335,8 @@ impl Mempool {
                 .remove(&txid)
                 .unwrap()
                 .into_iter()
-                .filter(|x| x.txid() != txid_val)
-                .collect::<Vec<_>>();
+                .filter(|x| !txid_val.contains(&x.txid()))
+                .collect_vec();
 
             if value.len() > 0 {
                 self.patrials.insert(value[0].txid(), value);
@@ -404,8 +407,6 @@ impl Mempool {
         debug!("Adding {} transactions to Mempool", txlen);
 
         let chunks = InscriptionUpdater::chain_mempool_inscriptions(&txs);
-
-        debug!("Mempool chunks count: {}", chunks.len());
 
         chunks
             .into_iter()
@@ -518,25 +519,15 @@ impl Mempool {
     }
 
     fn prepare_chunk(&mut self, chunk: Vec<Transaction>) {
-        let last_block_height = {
-            let last_block_hash = self
-                .chain
-                .store()
-                .temp_db()
-                .get(b"ot")
-                .map(|x| BlockHash::from_slice(&x).unwrap())
-                .unwrap();
+        let last_block_height = self
+            .chain
+            .blockid_by_hash(self.chain.store().indexed_headers.read().tip())
+            .unwrap()
+            .height as u32;
 
-            self.chain
-                .store()
-                .indexed_headers
-                .read()
-                .header_by_blockhash(&last_block_hash)
-                .unwrap()
-                .height() as u32
-        };
+        let prev_txid = chunk[0].input[0].previous_output.txid;
 
-        let mut mempool_partials = self.patrials.remove(&chunk[0].txid()).unwrap_or(vec![]);
+        let mut mempool_partials = self.patrials.remove(&prev_txid).unwrap_or(vec![]);
 
         let db_partials = load_partials(
             self.chain.store(),
@@ -548,7 +539,7 @@ impl Mempool {
         let tx = chunk.last().unwrap().clone();
         let txid = tx.txid();
 
-        let txs = [db_partials, mempool_partials.clone(), vec![tx.clone()]].concat();
+        let txs = [db_partials, mempool_partials.clone(), chunk].concat();
 
         match Inscription::from_transactions(txs.iter().collect_vec().as_slice()) {
             ParsedInscription::None => {}

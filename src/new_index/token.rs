@@ -187,19 +187,18 @@ impl TokenCache {
     }
 
     pub fn try_transfer(&mut self, h: u32, idx: usize, location: OutPoint, recipient: String) {
-        if !self.all_transfers.contains_key(&location)
-            || !self.valid_transfers.contains_key(&location)
+        if self.all_transfers.contains_key(&location)
+            || self.valid_transfers.contains_key(&location)
         {
-            return;
+            self.token_actions.push((
+                h,
+                idx,
+                TokenAction::Transferred {
+                    transfer_location: location,
+                    recipient,
+                },
+            ));
         }
-        self.token_actions.push((
-            h,
-            idx,
-            TokenAction::Transferred {
-                transfer_location: location,
-                recipient,
-            },
-        ));
     }
 
     pub fn load_tokens_data(&mut self, token_db: &DB) {

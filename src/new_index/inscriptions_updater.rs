@@ -193,13 +193,13 @@ impl InscriptionUpdater {
                 let owner = tx.output[0]
                     .script_pubkey
                     .to_address_str(crate::chain::Network::Bellscoin)
-                    .anyhow_as("No owner :(")?;
+                    .unwrap();
 
                 let inscription_number: u64 = self
                     .store
                     .temp_db()
                     .remove(&&LastInscriptionNumber::get_temp_db_key(block_height))
-                    .map(|x| u64::from_be_bytes(x.try_into().expect("Failed to convert")))
+                    .map(|x| u64::from_be_bytes(x.try_into().unwrap()))
                     .unwrap_or(0);
 
                 let new_row = OrdHistoryRow::new(
@@ -245,18 +245,10 @@ impl InscriptionUpdater {
                 );
 
                 self.store.inscription_db().write(
-                    vec![
-                        new_row.into_row(),
-                        inscription_extra.to_db_row()?,
-                        new_inc_n.to_db()?,
-                    ],
+                    vec![new_row.into_row(), inscription_extra.to_db_row()?],
                     super::db::DBFlush::Disable,
                 );
 
-                let partial_key =
-                    PartialTxs::get_temp_db_key(block_height, &tx.input[0].previous_output.txid);
-
-                self.store.temp_db().remove(&partial_key);
                 self.store.temp_db().write(
                     vec![new_inc_n.to_temp_db_row(block_height)?],
                     super::db::DBFlush::Disable,
@@ -267,7 +259,7 @@ impl InscriptionUpdater {
         Ok(0)
     }
 
-    pub fn chain_mempool_inscriptions(txs: &[Transaction]) -> Vec<Vec<Transaction>> {
+    pub fn chain_mempool_inscriptions(txs: &Vec<Transaction>) -> Vec<Vec<Transaction>> {
         let mut chain: HashMap<Txid, Vec<Transaction>> = txs
             .into_iter()
             .map(|x| (x.txid(), vec![x.clone()]))
@@ -336,13 +328,11 @@ impl InscriptionUpdater {
         Ok(false)
     }
 
-    pub fn copy_from_main_block(&self, current_block_height: u32) -> anyhow::Result<()> {
-        let next_block_height = current_block_height + 1;
-
+    pub fn copy_from_main_block(&self, block_height: u32) -> anyhow::Result<()> {
         if let Some(_) = self
             .store
             .temp_db()
-            .get(&LastInscriptionNumber::get_temp_db_key(next_block_height))
+            .get(&LastInscriptionNumber::get_temp_db_key(block_height))
         {
             return Ok(());
         }
@@ -355,7 +345,7 @@ impl InscriptionUpdater {
             .iter_scan(&bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS))?)
         {
             let mut x = PartialTxs::from_db(i)?;
-            x.block_height = next_block_height;
+            x.block_height = block_height;
             to_write.push(x.to_temp_db_row()?);
         }
 
@@ -367,7 +357,7 @@ impl InscriptionUpdater {
             .unwrap()
             .anyhow_as("Failed to decode last inscription number")?;
 
-        to_write.push(last_number.to_temp_db_row(next_block_height)?);
+        to_write.push(last_number.to_temp_db_row(block_height)?);
 
         self.store
             .temp_db()
@@ -1167,7 +1157,6 @@ pub fn load_partials(
     remove_partials: bool,
 ) -> Vec<Transaction> {
     let prev_txid = tx.input[0].previous_output.txid;
-
     let partial_key = PartialTxs::get_temp_db_key(block_height, &prev_txid);
 
     let tx_ids = {
@@ -1177,14 +1166,14 @@ pub fn load_partials(
         }
     }
     .map(|x| {
-        PartialTxs::from_db(DBRow {
+        PartialTxs::from_temp_db(DBRow {
             key: partial_key.clone(),
             value: x,
         })
         .unwrap()
         .txs
     })
-    .unwrap_or(vec![tx.txid()]);
+    .unwrap_or(vec![]);
 
     let key = tx_ids
         .into_iter()
@@ -1204,7 +1193,10 @@ pub fn load_partials(
         })
         .collect_vec();
 
-    txs.push(tx);
+    if remove_partials {
+        txs.push(tx);
+    }
+
     txs
 }
 
