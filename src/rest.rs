@@ -302,7 +302,7 @@ fn is_bare_multisig(script: &Script) -> bool {
 #[derive(Serialize, Debug)]
 pub struct InscriptionMeta {
     pub content_type: String,
-    pub content_lenght: usize,
+    pub content_length: usize,
     pub inscription_id: InscriptionId,
     pub inscription_number: u64,
     pub value: u64,

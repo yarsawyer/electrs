@@ -281,7 +281,7 @@ impl Indexer {
             to_delete.push(i.key);
         }
 
-        // Clear InscriptioExtraData
+        // Clear InscriptionExtraData
         for i in self.store.temp_db().iter_scan_reverse(
             &InscriptionExtraData::get_temp_db_iter_key(0),
             &InscriptionExtraData::get_temp_db_iter_key(remove_blocks_to),
@@ -380,10 +380,6 @@ impl Indexer {
     ) -> anyhow::Result<()> {
         let inscription_updater = InscriptionUpdater::new(self.store.clone()).anyhow()?;
         let blocks = self.get_blocks_by_height(&block).anyhow()?;
-        let blocks_numbers = blocks
-            .iter()
-            .map(|x| self.get_block_height(*x).unwrap())
-            .collect_vec();
 
         if let Some(block_hash) = blocks.last() {
             let block_number = self.get_block_height(*block_hash).unwrap();
@@ -404,7 +400,7 @@ impl Indexer {
             let block_number = self.get_block_height(*b_hash).unwrap();
 
             inscription_updater
-                .remove_temp_data_orhpan(
+                .remove_temp_data_orphan(
                     block_number as u32 - HEIGHT_DELAY - 1,
                     first_inscription_block,
                 )
@@ -448,7 +444,7 @@ impl Indexer {
 
             drop(keys);
 
-            let txos = txos.into_iter().map(|x| (x.0, x.1.value)).collect();
+            let txos = txos.into_iter().map(|x| (x.0, x.1)).collect();
 
             for (i, tx) in txs.into_iter().enumerate() {
                 inscription_updater.index_transaction_inscriptions(
@@ -524,9 +520,11 @@ impl Indexer {
 
         drop(progress);
 
-        indexer.write_patrials().unwrap();
+        indexer.write_partials().unwrap();
         indexer.write_inscription_number().unwrap();
         token_cache.write_valid_transfers(self.store.token_db());
+
+        self.store.inscription_db().flush();
 
         self.start_auto_compactions(&self.store.inscription_db);
 
@@ -1134,7 +1132,7 @@ impl ChainQuery {
                 .flatten()
                 .map(|x| InscriptionExtraDataValue::from_raw(x).unwrap())
                 .map(|x| InscriptionMeta {
-                    content_lenght: x.content_length,
+                    content_length: x.content_length,
                     content_type: x.content_type,
                     inscription_id: x.genesis.into(),
                     inscription_number: x.number,

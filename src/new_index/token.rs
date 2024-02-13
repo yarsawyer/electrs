@@ -186,7 +186,7 @@ impl TokenCache {
         self.all_transfers.extend(cache.all_transfers);
     }
 
-    pub fn try_transfered(&mut self, h: u32, idx: usize, location: OutPoint, recipient: String) {
+    pub fn try_transfer(&mut self, h: u32, idx: usize, location: OutPoint, recipient: String) {
         if !self.all_transfers.contains_key(&location)
             || !self.valid_transfers.contains_key(&location)
         {
@@ -195,7 +195,7 @@ impl TokenCache {
         self.token_actions.push((
             h,
             idx,
-            TokenAction::Transfered {
+            TokenAction::Transferred {
                 transfer_location: location,
                 recipient,
             },
@@ -230,7 +230,7 @@ impl TokenCache {
                     tickers.insert(tick.clone());
                     users.insert((owner, tick.clone()));
                 }
-                TokenAction::Transfered {
+                TokenAction::Transferred {
                     transfer_location,
                     recipient,
                 } => {
@@ -382,7 +382,7 @@ impl TokenCache {
 
                     self.valid_transfers.insert(location, (key.owner, data));
                 }
-                TokenAction::Transfered {
+                TokenAction::Transferred {
                     transfer_location,
                     recipient,
                     ..
@@ -540,7 +540,7 @@ pub enum TokenAction {
         proto: TransferProto,
     },
     // ? Founded move of transfer action.
-    Transfered {
+    Transferred {
         transfer_location: OutPoint,
         recipient: String,
     },

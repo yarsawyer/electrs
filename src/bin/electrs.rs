@@ -208,7 +208,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
 
             if !removed.is_empty() {
                 let first_height = removed.first().unwrap().height() as u32;
-                error!("Reorg happened, blocks lenght: {}", removed.len());
+                error!("Reorg happened, blocks length: {}", removed.len());
                 inscription_updater
                     .reorg_handler(removed, config.first_inscription_block)
                     .expect("Something went wrong with removing blocks");

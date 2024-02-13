@@ -826,8 +826,7 @@ impl LastInscriptionNumber {
 
     pub fn to_db(&self) -> anyhow::Result<DBRow> {
         Ok(DBRow {
-            key: bincode_util::serialize_big(INSCRIPTION_NUMBER)
-                .anyhow_as("Cannot serialize LastInscriptionNumber")?,
+            key: Self::get_db_key(),
             value: bincode_util::serialize_big(&self.number)
                 .anyhow_as("Cannot serialize LastInscriptionNumber")?,
         })

@@ -1,3 +1,5 @@
+use bitcoin::hashes::Hash;
+use bitcoin::BlockHash;
 use bounded_vec_deque::BoundedVecDeque;
 use itertools::Itertools;
 
@@ -12,14 +14,18 @@ use std::time::{Duration, Instant};
 use crate::chain::{deserialize, Network, OutPoint, Transaction, TxOut, Txid};
 use crate::config::Config;
 use crate::daemon::Daemon;
-use crate::errors::*;
+use crate::inscription_entries::ParsedInscription;
 use crate::metrics::{GaugeVec, HistogramOpts, HistogramVec, MetricOpts, Metrics};
+use crate::new_index::InscriptionUpdater;
 use crate::new_index::{
     compute_script_hash, schema::FullHash, ChainQuery, FundingInfo, ScriptStats, SpendingInfo,
     SpendingInput, TxHistoryInfo, Utxo,
 };
 use crate::util::fees::{make_fee_histogram, TxFeeInfo};
 use crate::util::{extract_tx_prevouts, full_hash, has_prevout, is_spendable, Bytes};
+use crate::{errors::*, Inscription};
+
+use super::inscriptions_updater::load_partials;
 
 pub struct Mempool {
     chain: Arc<ChainQuery>,
@@ -29,6 +35,8 @@ pub struct Mempool {
     history: HashMap<FullHash, Vec<TxHistoryInfo>>, // ScriptHash -> {history_entries}
     edges: HashMap<OutPoint, (Txid, u32)>,          // OutPoint -> (spending_txid, spending_vin)
     recent: BoundedVecDeque<TxOverview>,            // The N most recent txs to enter the mempool
+    inscriptions: HashMap<OutPoint, OutPoint>,
+    patrials: HashMap<Txid, Vec<Transaction>>,
     backlog_stats: (BacklogStats, Instant),
 
     // monitoring
@@ -55,6 +63,8 @@ impl Mempool {
             history: HashMap::new(),
             edges: HashMap::new(),
             recent: BoundedVecDeque::new(config.mempool_recent_txs_size),
+            inscriptions: HashMap::new(),
+            patrials: HashMap::new(),
             backlog_stats: (
                 BacklogStats::default(),
                 Instant::now() - Duration::from_secs(config.mempool_backlog_stats_ttl),
@@ -202,7 +212,9 @@ impl Mempool {
                 owner: None,
             };
 
-            if !self.has_spend(&OutPoint::from(&v)) {
+            let outpoint = OutPoint::from(&v);
+
+            if !self.has_spend(&outpoint) && !self.inscriptions.contains_key(&outpoint) {
                 utxo.push(v);
             }
         }
@@ -284,6 +296,16 @@ impl Mempool {
         &self.backlog_stats.0
     }
 
+    fn remove_inscriptions_by_txid(&mut self, txid: &Txid) {
+        let tx = self.txstore.get(txid).expect("missing tx from txstore");
+        for (vout, _) in tx.output.iter().enumerate() {
+            self.inscriptions.remove(&OutPoint {
+                txid: *txid,
+                vout: vout as u32,
+            });
+        }
+    }
+
     pub fn update(&mut self, daemon: &Daemon) -> Result<()> {
         let _timer = self.latency.with_label_values(&["update"]).start_timer();
         let new_txids = daemon
@@ -291,6 +313,32 @@ impl Mempool {
             .chain_err(|| "failed to update mempool from daemon")?;
         let old_txids = HashSet::from_iter(self.txstore.keys().cloned());
         let to_remove: HashSet<&Txid> = old_txids.difference(&new_txids).collect();
+
+        let mut partials_to_remove = Vec::new();
+
+        to_remove.iter().for_each(|&x| {
+            self.remove_inscriptions_by_txid(x);
+
+            for (txid, txs) in self.patrials.iter() {
+                if txs.iter().any(|tx| tx.txid() == *x) {
+                    partials_to_remove.push((*txid, *x));
+                }
+            }
+        });
+
+        for (txid, txid_val) in partials_to_remove {
+            let value = self
+                .patrials
+                .remove(&txid)
+                .unwrap()
+                .into_iter()
+                .filter(|x| x.txid() != txid_val)
+                .collect::<Vec<_>>();
+
+            if value.len() > 0 {
+                self.patrials.insert(value[0].txid(), value);
+            }
+        }
 
         // Download and add new transactions from tidecoind's mempool
         let txids: Vec<&Txid> = new_txids.difference(&old_txids).collect();
@@ -355,6 +403,14 @@ impl Mempool {
         }
         debug!("Adding {} transactions to Mempool", txlen);
 
+        let chunks = InscriptionUpdater::chain_mempool_inscriptions(&txs);
+
+        debug!("Mempool chunks count: {}", chunks.len());
+
+        chunks
+            .into_iter()
+            .for_each(|chunk| self.prepare_chunk(chunk));
+
         let mut txids = Vec::with_capacity(txs.len());
         // Phase 1: add to txstore
         for tx in txs {
@@ -379,6 +435,14 @@ impl Mempool {
         // 7. Insert the tx edges into edges (HashMap of (Outpoint, (Txid, vin)))
         for txid in txids {
             let tx = self.txstore.get(&txid).expect("missing tx from txstore");
+
+            InscriptionUpdater::check_mempool_move(
+                self.chain.store().inscription_db(),
+                tx,
+                &mut self.inscriptions,
+                &txos,
+            )
+            .unwrap();
 
             let prevouts = match extract_tx_prevouts(tx, &txos) {
                 Ok(v) => v,
@@ -451,6 +515,52 @@ impl Mempool {
         }
 
         processed_count
+    }
+
+    fn prepare_chunk(&mut self, chunk: Vec<Transaction>) {
+        let last_block_height = {
+            let last_block_hash = self
+                .chain
+                .store()
+                .temp_db()
+                .get(b"ot")
+                .map(|x| BlockHash::from_slice(&x).unwrap())
+                .unwrap();
+
+            self.chain
+                .store()
+                .indexed_headers
+                .read()
+                .header_by_blockhash(&last_block_hash)
+                .unwrap()
+                .height() as u32
+        };
+
+        let mut mempool_partials = self.patrials.remove(&chunk[0].txid()).unwrap_or(vec![]);
+
+        let db_partials = load_partials(
+            self.chain.store(),
+            mempool_partials.first().unwrap_or(&chunk[0]).clone(),
+            last_block_height,
+            false,
+        );
+
+        let tx = chunk.last().unwrap().clone();
+        let txid = tx.txid();
+
+        let txs = [db_partials, mempool_partials.clone(), vec![tx.clone()]].concat();
+
+        match Inscription::from_transactions(txs.iter().collect_vec().as_slice()) {
+            ParsedInscription::None => {}
+            ParsedInscription::Partial => {
+                mempool_partials.push(tx);
+                self.patrials.insert(txid, mempool_partials);
+            }
+            ParsedInscription::Complete(_) => {
+                let outpoint = OutPoint { txid, vout: 0 };
+                self.inscriptions.insert(outpoint, outpoint);
+            }
+        }
     }
 
     /// Returns None if the lookup fails (mempool transaction RBF-ed etc.)
