@@ -91,7 +91,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
 
     let tip_height = store.get_block_height(tip).unwrap() as u32;
 
-    let temp_offset = tip_height - HEIGHT_DELAY - 1;
+    let temp_offset = tip_height - HEIGHT_DELAY;
 
     let temp_ot = {
         if let Some(ot) = indexer.clear_temp(temp_offset) {
@@ -103,7 +103,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
         } else {
             temp_offset
         }
-    } + 2;
+    } + 1;
 
     let ot = store
         .inscription_db()
