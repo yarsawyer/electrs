@@ -226,6 +226,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
                 inscription_updater
                     .reorg_handler(removed, config.first_inscription_block)
                     .expect("Something went wrong with removing blocks");
+                token_cache.remove_token_actions(first_height);
                 inscription_updater.copy_to_next_block(first_height - 1 as u32)?;
             }
 

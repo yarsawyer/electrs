@@ -295,6 +295,25 @@ impl TokenCache {
         self.token_accounts = token_accounts;
     }
 
+    pub fn remove_token_actions(&mut self, height: u32) {
+        self.token_actions
+            .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+        {
+            let mut res = None;
+            for (i, (h, _, _)) in self.token_actions.iter().enumerate().rev() {
+                if *h >= height {
+                    res = Some(i);
+                } else {
+                    break;
+                }
+            }
+            if let Some(res) = res {
+                self.token_actions.drain(res..);
+            }
+        }
+    }
+
     pub fn process_token_actions(&mut self, height: Option<u32>) {
         self.token_actions
             .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
