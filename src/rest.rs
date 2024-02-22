@@ -1,10 +1,11 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
 use crate::errors;
+use crate::inscription_entries::inscription::InscriptionExtraData;
 use crate::inscription_entries::InscriptionId;
 use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::schema::OrdsSearcher;
-use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
+use crate::new_index::{compute_script_hash, DBRow, Query, SpendingInput, Utxo};
 use crate::util::errors::UnwrapPrint;
 use crate::util::{
     create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
@@ -22,6 +23,7 @@ use hex::{self, FromHexError};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Response, Server, StatusCode};
 
+use rocksdb::DB;
 use tokio::sync::oneshot;
 
 use hyperlocal::UnixServerExt;
@@ -1264,6 +1266,36 @@ fn handle_request(
                 },
                 TTL_SHORT,
             )
+        }
+        (&Method::GET, Some(&"ord"), Some(v), None, None, None) => {
+            let outpoint = InscriptionId::from_str(*v);
+            if let Ok(outpoint) = outpoint {
+                let outpoint = OutPoint {
+                    txid: outpoint.txid,
+                    vout: outpoint.index,
+                };
+
+                let ord = query
+                    .chain()
+                    .store()
+                    .inscription_db()
+                    .get(&InscriptionExtraData::get_db_key(outpoint))
+                    .map(|x| {
+                        InscriptionExtraData::from_raw(DBRow {
+                            key: InscriptionExtraData::get_db_key(outpoint),
+                            value: x,
+                        })
+                        .unwrap()
+                    });
+
+                if let Some(ord) = ord {
+                    json_response(ord, TTL_SHORT)
+                } else {
+                    http_message(StatusCode::NOT_FOUND, "Not found", TTL_SHORT)
+                }
+            } else {
+                http_message(StatusCode::BAD_REQUEST, "Invalid outpoint", TTL_SHORT)
+            }
         }
 
         _ => Err(HttpError::not_found(format!(

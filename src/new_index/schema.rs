@@ -488,7 +488,7 @@ impl Indexer {
             cached_transfer: HashMap::new(),
         };
 
-        let mut token_cache = TokenCache::default();
+        let mut token_cache: TokenCache = TokenCache::default();
 
         {
             let progress = Progress::begin("Indexing inscriptions blocks", blocks.len() as u64, 0);

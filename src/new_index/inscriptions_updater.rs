@@ -1,4 +1,4 @@
-use std::{collections::HashMap, convert::TryInto, sync::Arc};
+use std::{collections::HashMap, convert::TryInto, str::FromStr, sync::Arc};
 
 use crate::{
     config::TOKENS_OFFSET,
@@ -73,7 +73,7 @@ impl InscriptionUpdater {
 
                 to_write.push(inscription_extra.to_temp_db_row(block_height, &previous_tx)?);
 
-                let inputs_cum = InscriptionSearcher::calc_offsets(&tx, &txos);
+                let inputs_cum = InscriptionSearcher::calc_offsets(&tx, &txos).unwrap();
 
                 // Work with old user
                 let prev_history_value = {
@@ -168,7 +168,7 @@ impl InscriptionUpdater {
             ParsedInscription::Partial => {
                 let row = PartialTxs {
                     block_height,
-                    last_txid: txid,
+                    last_outpoint: OutPoint { txid, vout: 0 },
                     txs: txs.into_iter().map(|x| x.txid()).collect_vec(),
                 };
 
@@ -285,8 +285,14 @@ impl InscriptionUpdater {
         tx: &Transaction,
         mempool_inscriptions: &mut HashMap<OutPoint, OutPoint>,
         txos: &HashMap<OutPoint, TxOut>,
-    ) -> Result<bool> {
-        let inputs_cum = InscriptionSearcher::calc_offsets(&tx, &txos);
+    ) -> Result<()> {
+        let inputs_cum = {
+            let inputs = InscriptionSearcher::calc_offsets(&tx, &txos);
+            if inputs.is_none() {
+                return Ok(());
+            }
+            inputs.unwrap()
+        };
 
         for (idx, input) in tx.input.iter().enumerate() {
             let Some(inscription_extra) = ({
@@ -325,7 +331,7 @@ impl InscriptionUpdater {
                 continue;
             };
         }
-        Ok(false)
+        Ok(())
     }
 
     pub fn copy_from_main_block(&self, block_height: u32) -> anyhow::Result<()> {
@@ -581,7 +587,7 @@ impl InscriptionUpdater {
 
 pub struct IndexHandler<'a> {
     pub store: &'a Store,
-    pub cached_partial: HashMap<Txid, Vec<(u32, usize, Transaction)>>,
+    pub cached_partial: HashMap<OutPoint, Vec<(u32, usize, Transaction)>>,
     pub inscription_number: u64,
 }
 impl<'a> IndexHandler<'a> {
@@ -590,12 +596,12 @@ impl<'a> IndexHandler<'a> {
         txs: &[Transaction],
         sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
     ) -> DigestedBlock {
-        let mut partials: HashMap<Txid, Vec<(u32, usize, Transaction)>> = HashMap::new();
+        let mut partials: HashMap<OutPoint, Vec<(u32, usize, Transaction)>> = HashMap::new();
         let mut inscriptions = vec![];
         let mut rest = vec![];
         let mut token_cache = TokenCache::default();
 
-        for (i, tx) in txs.iter().enumerate() {
+        for (i, tx) in txs.into_iter().enumerate() {
             if !Self::parse_inscriptions(
                 tx,
                 h,
@@ -650,8 +656,13 @@ impl<'a> IndexHandler<'a> {
                 );
             }
 
+            digested_block
+                .completed_inscription
+                .sort_unstable_by_key(|x| (x.1.height, x.0));
+
             for (_, mut inc) in digested_block.completed_inscription {
                 inc.inscription_number = self.inscription_number;
+
                 self.inscription_number += 1;
                 completed.push(inc);
             }
@@ -664,13 +675,13 @@ impl<'a> IndexHandler<'a> {
         tx: &Transaction,
         height: u32,
         idx: usize,
-        cache: &mut HashMap<Txid, Vec<(u32, usize, Transaction)>>,
+        cache: &mut HashMap<OutPoint, Vec<(u32, usize, Transaction)>>,
         inscriptions: &mut Vec<(usize, InscriptionTemplate)>,
         token_cache: &mut TokenCache,
         sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
     ) -> bool {
         let mut chain = cache
-            .remove(&tx.input[0].previous_output.txid)
+            .remove(&tx.input[0].previous_output)
             .unwrap_or_default();
 
         chain.push((height, idx, tx.clone()));
@@ -678,7 +689,13 @@ impl<'a> IndexHandler<'a> {
         match Inscription::from_transactions(&chain.iter().map(|x| &x.2).collect_vec()) {
             ParsedInscription::None => false,
             ParsedInscription::Partial => {
-                cache.insert(tx.txid(), chain);
+                cache.insert(
+                    OutPoint {
+                        txid: tx.txid(),
+                        vout: 0,
+                    },
+                    chain,
+                );
                 true
             }
             ParsedInscription::Complete(inscription) => {
@@ -781,10 +798,10 @@ impl<'a> IndexHandler<'a> {
             let to_write = self
                 .cached_partial
                 .iter()
-                .map(|(last_txid, txs)| {
+                .map(|(last_outpoint, txs)| {
                     PartialTxs {
                         block_height: txs[0].0,
-                        last_txid: *last_txid,
+                        last_outpoint: *last_outpoint,
                         txs: txs.iter().map(|x| x.2.txid()).collect_vec(),
                     }
                     .to_db()
@@ -950,7 +967,7 @@ impl<'a> MoveIndexer<'a> {
                     continue;
                 }
 
-                let inputs_cum = InscriptionSearcher::calc_offsets(tx, &txos);
+                let inputs_cum = InscriptionSearcher::calc_offsets(tx, &txos).unwrap();
 
                 for (idx, mut inc) in found_inscriptions {
                     let Result::Ok((vout, offset)) = InscriptionSearcher::get_output_index_by_input(
@@ -1052,7 +1069,7 @@ impl<'a> MoveIndexer<'a> {
 
 pub struct DigestedBlock {
     pub height: u32,
-    pub partial_inscription: HashMap<Txid, Vec<(u32, usize, Transaction)>>,
+    pub partial_inscription: HashMap<OutPoint, Vec<(u32, usize, Transaction)>>,
     pub completed_inscription: Vec<(usize, InscriptionTemplate)>,
     pub rest: Vec<(u32, usize, Transaction)>,
     pub token_cache: TokenCache,
@@ -1084,12 +1101,12 @@ pub struct MovedInscription {
 struct InscriptionSearcher {}
 
 impl InscriptionSearcher {
-    fn calc_offsets(tx: &Transaction, tx_outs: &HashMap<OutPoint, TxOut>) -> Vec<u64> {
+    fn calc_offsets(tx: &Transaction, tx_outs: &HashMap<OutPoint, TxOut>) -> Option<Vec<u64>> {
         let mut input_values = tx
             .input
             .iter()
-            .map(|x| tx_outs.get(&x.previous_output).unwrap().value)
-            .collect_vec();
+            .map(|x| tx_outs.get(&x.previous_output).map(|x| x.value))
+            .collect::<Option<Vec<u64>>>()?;
 
         let spend: u64 = input_values.iter().sum();
 
@@ -1109,7 +1126,7 @@ impl InscriptionSearcher {
 
         inputs_offsets.pop();
 
-        inputs_offsets
+        Some(inputs_offsets)
     }
 
     fn get_output_index_by_input(
@@ -1156,8 +1173,7 @@ pub fn load_partials(
     block_height: u32,
     remove_partials: bool,
 ) -> Vec<Transaction> {
-    let prev_txid = tx.input[0].previous_output.txid;
-    let partial_key = PartialTxs::get_temp_db_key(block_height, &prev_txid);
+    let partial_key = PartialTxs::get_temp_db_key(block_height, &tx.input[0].previous_output);
 
     let tx_ids = {
         match remove_partials {

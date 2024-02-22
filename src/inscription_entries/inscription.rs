@@ -419,15 +419,16 @@ impl InscriptionExtraData {
 
 pub struct PartialTxs {
     pub txs: Vec<Txid>,
-    pub last_txid: Txid,
+    pub last_outpoint: OutPoint,
     pub block_height: u32,
 }
 
 impl PartialTxs {
     pub fn from_db(value: DBRow) -> anyhow::Result<Self> {
-        let (_, txid): (String, [u8; 32]) = bincode_util::deserialize_big(&value.key)
+        let (_, txid, vout): (String, [u8; 32], u32) = bincode_util::deserialize_big(&value.key)
             .anyhow_as("Failed to decode partial txs key")?;
         let txid = Txid::from_slice(&txid)?;
+        let outpoint = OutPoint { txid, vout };
 
         let txs: Vec<Txid> = value
             .value
@@ -438,7 +439,7 @@ impl PartialTxs {
 
         Ok(Self {
             txs,
-            last_txid: txid,
+            last_outpoint: outpoint,
             block_height: 0,
         })
     }
@@ -456,21 +457,31 @@ impl PartialTxs {
     }
 
     pub fn get_db_key(&self) -> Vec<u8> {
-        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, self.last_txid.into_inner())).unwrap()
+        bincode_util::serialize_big(&(
+            PARTIAL_TXID_TO_TXIDS,
+            self.last_outpoint.txid.into_inner(),
+            self.last_outpoint.vout,
+        ))
+        .unwrap()
     }
 
     pub fn get_temp_iter_key(block_height: u32) -> Vec<u8> {
         bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, block_height)).unwrap()
     }
 
-    pub fn get_temp_db_key(block_height: u32, txid: &Txid) -> Vec<u8> {
-        bincode_util::serialize_big(&(PARTIAL_TXID_TO_TXIDS, block_height, txid.into_inner()))
-            .unwrap()
+    pub fn get_temp_db_key(block_height: u32, outpoint: &OutPoint) -> Vec<u8> {
+        bincode_util::serialize_big(&(
+            PARTIAL_TXID_TO_TXIDS,
+            block_height,
+            outpoint.txid.into_inner(),
+            outpoint.vout,
+        ))
+        .unwrap()
     }
 
     pub fn to_temp_db_row(&self) -> anyhow::Result<DBRow> {
         Ok(DBRow {
-            key: Self::get_temp_db_key(self.block_height, &self.last_txid),
+            key: Self::get_temp_db_key(self.block_height, &self.last_outpoint),
             value: self
                 .txs
                 .iter()
@@ -481,11 +492,15 @@ impl PartialTxs {
     }
 
     pub fn from_temp_db(row: DBRow) -> anyhow::Result<Self> {
-        let (_, block_height, txid): (String, u32, [u8; 32]) =
+        let (_, block_height, txid, vout): (String, u32, [u8; 32], u32) =
             bincode_util::deserialize_big(&row.key)
                 .anyhow_as("Failed to decode partial txs key")?;
 
         let last_txid = Txid::from_slice(&txid).anyhow_as("Failed to decode last_txid")?;
+        let last_outpoint = OutPoint {
+            txid: last_txid,
+            vout,
+        };
 
         let txs: Vec<Txid> = row
             .value
@@ -496,7 +511,7 @@ impl PartialTxs {
 
         Ok(Self {
             txs,
-            last_txid,
+            last_outpoint,
             block_height,
         })
     }
