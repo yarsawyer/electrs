@@ -1035,6 +1035,12 @@ impl ChainQuery {
                     stats.amount += i.value;
                 }
 
+                if stats.count > 10_000 {
+                    self.store()
+                        .inscription_db()
+                        .write(vec![stats.to_db_row(&address).unwrap()], DBFlush::Disable);
+                }
+
                 stats
             }))
     }

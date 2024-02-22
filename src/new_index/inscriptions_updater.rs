@@ -7,6 +7,7 @@ use crate::{
         inscription::{
             update_last_block_number, Inscription, InscriptionContent, InscriptionExtraData,
             LastInscriptionNumber, OrdHistoryRow, OrdHistoryValue, ParsedInscription, PartialTxs,
+            UserOrdStats,
         },
         InscriptionId,
     },
@@ -69,9 +70,23 @@ impl InscriptionUpdater {
                 .transpose()?
             {
                 let old_owner = inscription_extra.value.owner.clone();
+
+                let mut to_temp_write = vec![];
                 let mut to_write = vec![];
 
-                to_write.push(inscription_extra.to_temp_db_row(block_height, &previous_tx)?);
+                if let Some(mut v) = self
+                    .store
+                    .inscription_db()
+                    .get(&UserOrdStats::get_db_key(&old_owner).unwrap())
+                    .map(|x| UserOrdStats::from_raw(&x).unwrap())
+                {
+                    v.amount -= inscription_extra.value.value;
+                    v.count -= 1;
+
+                    to_write.push(v.to_db_row(&old_owner).unwrap());
+                }
+
+                to_temp_write.push(inscription_extra.to_temp_db_row(block_height, &previous_tx)?);
 
                 let inputs_cum = InscriptionSearcher::calc_offsets(&tx, &txos).unwrap();
 
@@ -87,9 +102,9 @@ impl InscriptionUpdater {
                         .map(|x| OrdHistoryRow::value_from_raw(&x))
                         .anyhow_as("Failed to find OrdHistoryRow")?;
 
-                    to_write.push(DBRow {
+                    to_temp_write.push(DBRow {
                         key: OrdHistoryRow::get_temp_db_key(
-                            old_owner.clone(),
+                            old_owner,
                             &prev_outpoint,
                             block_height,
                         ),
@@ -101,7 +116,7 @@ impl InscriptionUpdater {
 
                 self.store
                     .temp_db()
-                    .write(to_write, super::db::DBFlush::Disable);
+                    .write(to_temp_write, super::db::DBFlush::Disable);
 
                 let Result::Ok((vout, offset)) = InscriptionSearcher::get_output_index_by_input(
                     inputs_cum
@@ -138,6 +153,18 @@ impl InscriptionUpdater {
 
                     inscription_extra.value.owner = new_owner.clone();
 
+                    if let Some(mut v) = self
+                        .store
+                        .inscription_db()
+                        .get(&UserOrdStats::get_db_key(&new_owner).unwrap())
+                        .map(|x| UserOrdStats::from_raw(&x).unwrap())
+                    {
+                        v.amount += inscription_extra.value.value;
+                        v.count += 1;
+
+                        to_write.push(v.to_db_row(&new_owner).unwrap());
+                    }
+
                     token_cache.try_transfer(
                         block_height,
                         tx_idx,
@@ -148,13 +175,16 @@ impl InscriptionUpdater {
                     OrdHistoryRow::new(new_owner, new_outpoint, prev_history_value)
                 };
 
+                to_write.push(ord_history.into_row());
+
                 inscription_extra.location = new_outpoint;
                 inscription_extra.value.offset = offset;
 
-                self.store.inscription_db().write(
-                    vec![ord_history.into_row(), inscription_extra.to_db_row()?],
-                    super::db::DBFlush::Disable,
-                );
+                to_write.push(inscription_extra.to_db_row()?);
+
+                self.store
+                    .inscription_db()
+                    .write(to_write, super::db::DBFlush::Disable);
 
                 return Ok(0);
             };
@@ -233,21 +263,34 @@ impl InscriptionUpdater {
                     })
                     .anyhow_as("Failed to send inscription content")?;
 
+                let mut to_write = vec![new_row.into_row(), inscription_extra.to_db_row()?];
+
+                if let Some(mut v) = self
+                    .store
+                    .inscription_db()
+                    .get(&UserOrdStats::get_db_key(&owner).unwrap())
+                    .map(|x| UserOrdStats::from_raw(&x).unwrap())
+                {
+                    v.amount += inscription_extra.value.value;
+                    v.count += 1;
+
+                    to_write.push(v.to_db_row(&owner).unwrap());
+                }
+
                 token_cache.parse_token_action(
                     inscription.content_type().unwrap(),
                     inscription.body().unwrap(),
                     block_height,
                     tx_idx,
-                    owner.clone(),
+                    owner,
                     genesis,
                     location,
                     Some(self.store.temp_db()),
                 );
 
-                self.store.inscription_db().write(
-                    vec![new_row.into_row(), inscription_extra.to_db_row()?],
-                    super::db::DBFlush::Disable,
-                );
+                self.store
+                    .inscription_db()
+                    .write(to_write, super::db::DBFlush::Disable);
 
                 self.store.temp_db().write(
                     vec![new_inc_n.to_temp_db_row(block_height)?],
@@ -444,6 +487,21 @@ impl InscriptionUpdater {
                         )
                     })
                     .for_each(|(key, (extra, _))| {
+                        if let Some(mut v) = self
+                            .store
+                            .inscription_db()
+                            .get(&UserOrdStats::get_db_key(&extra.value.owner).unwrap())
+                            .map(|x| UserOrdStats::from_raw(&x).unwrap())
+                        {
+                            v.amount += extra.value.value;
+                            v.count += 1;
+
+                            self.store.inscription_db().write(
+                                vec![v.to_db_row(&extra.value.owner).unwrap()],
+                                super::db::DBFlush::Disable,
+                            );
+                        }
+
                         // Extra data to restore
                         {
                             self.store.temp_db().db.delete(&key).unwrap();
@@ -492,13 +550,30 @@ impl InscriptionUpdater {
                         let extra_key = InscriptionExtraData::get_db_key(outpoint);
                         let history_key = OrdHistoryRow::create_db_key(owner, &outpoint);
 
-                        if let Some(_) = self.store.inscription_db().remove(&extra_key).map(|x| {
-                            InscriptionExtraData::from_raw(DBRow {
-                                key: extra_key,
-                                value: x,
+                        if let Some(extra) =
+                            self.store.inscription_db().remove(&extra_key).map(|x| {
+                                InscriptionExtraData::from_raw(DBRow {
+                                    key: extra_key,
+                                    value: x,
+                                })
+                                .unwrap()
                             })
-                            .unwrap()
-                        }) {
+                        {
+                            if let Some(mut v) = self
+                                .store
+                                .inscription_db()
+                                .get(&UserOrdStats::get_db_key(&extra.value.owner).unwrap())
+                                .map(|x| UserOrdStats::from_raw(&x).unwrap())
+                            {
+                                v.amount -= extra.value.value;
+                                v.count -= 1;
+
+                                self.store.inscription_db().write(
+                                    vec![v.to_db_row(&extra.value.owner).unwrap()],
+                                    super::db::DBFlush::Disable,
+                                );
+                            }
+
                             self.store.inscription_db().db.delete(&history_key).unwrap();
                         }
                     }
@@ -754,6 +829,27 @@ impl<'a> IndexHandler<'a> {
     pub fn write_inscription(&self, data: Vec<InscriptionTemplate>) -> anyhow::Result<()> {
         let mut to_write = vec![];
 
+        let mut stats_cache: HashMap<_, _> = self
+            .store
+            .inscription_db()
+            .db
+            .multi_get(
+                data.iter()
+                    .map(|x| UserOrdStats::get_db_key(&x.owner).unwrap())
+                    .collect_vec(),
+            )
+            .into_iter()
+            .flatten()
+            .map(|x| x.map(|x| UserOrdStats::from_raw(&x).unwrap()))
+            .zip(data.iter())
+            .map(|x| {
+                let owner = x.1.owner.clone();
+
+                x.0.map(|z| (owner, z))
+            })
+            .flatten()
+            .collect();
+
         for inc in data {
             let genesis = inc.genesis;
             let location = inc.location;
@@ -773,7 +869,7 @@ impl<'a> IndexHandler<'a> {
             let inscription_extra = InscriptionExtraData::new(
                 location,
                 genesis,
-                inc.owner,
+                inc.owner.clone(),
                 inc.height,
                 inc.content_type,
                 inc.content_len,
@@ -782,9 +878,20 @@ impl<'a> IndexHandler<'a> {
                 inc.value,
             );
 
+            if let Some(v) = stats_cache.get_mut(&inc.owner) {
+                v.amount += inc.value;
+                v.count += 1;
+            }
+
             to_write.push(new_row.into_row());
             to_write.push(inscription_extra.to_db_row()?);
         }
+
+        to_write.extend(
+            stats_cache
+                .into_iter()
+                .map(|(k, v)| v.to_db_row(&k).unwrap()),
+        );
 
         self.store
             .inscription_db()
@@ -1019,6 +1126,30 @@ impl<'a> MoveIndexer<'a> {
     pub fn write_moves(&self, data: HashMap<OutPoint, MovedInscription>) -> anyhow::Result<()> {
         let mut to_write = vec![];
 
+        let keys = {
+            let mut keys = data.values().map(|x| &x.data.value.owner).collect_vec();
+            keys.extend(data.values().map(|x| &x.new_owner).flatten());
+
+            keys.into_iter().unique().collect_vec()
+        };
+
+        let mut stats_cache: HashMap<_, _> = self
+            .store
+            .inscription_db()
+            .db
+            .multi_get(keys.iter().map(|x| UserOrdStats::get_db_key(&x).unwrap()))
+            .into_iter()
+            .flatten()
+            .map(|x| x.map(|x| UserOrdStats::from_raw(&x).unwrap()))
+            .zip(keys)
+            .map(|x| {
+                let owner = x.1.clone();
+
+                x.0.map(|z| (owner, z))
+            })
+            .flatten()
+            .collect();
+
         for (new_location, mut inc) in data {
             if !inc.leaked && inc.new_owner.is_none() {
                 continue;
@@ -1026,6 +1157,11 @@ impl<'a> MoveIndexer<'a> {
 
             let old_location = inc.data.location;
             let old_owner = inc.data.value.owner.clone();
+
+            if let Some(v) = stats_cache.get_mut(&old_owner) {
+                v.amount -= inc.data.value.value;
+                v.count -= 1;
+            }
 
             inc.data.location = new_location;
             if inc.leaked {
@@ -1048,6 +1184,11 @@ impl<'a> MoveIndexer<'a> {
             };
 
             if let Some(new_owner) = inc.new_owner {
+                if let Some(v) = stats_cache.get_mut(&new_owner) {
+                    v.amount += inc.data.value.value;
+                    v.count += 1;
+                }
+
                 inc.data.value.owner = new_owner.clone();
 
                 let new_ord_history =
@@ -1058,6 +1199,12 @@ impl<'a> MoveIndexer<'a> {
 
             to_write.push(inc.data.to_db_row()?);
         }
+
+        to_write.extend(
+            stats_cache
+                .into_iter()
+                .map(|x| x.1.to_db_row(&x.0).unwrap()),
+        );
 
         self.store
             .inscription_db()
