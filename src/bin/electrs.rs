@@ -9,6 +9,7 @@ extern crate electrs;
 
 use bitcoin::{hashes::Hash, BlockHash};
 use error_chain::ChainedError;
+use itertools::Itertools;
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,8 +22,9 @@ use electrs::{
     inscription_entries::inscription::{update_last_block_number, InscriptionContent},
     metrics::Metrics,
     new_index::{
-        exchange_data::ExchangeData, precache, schema::InscriptionParseBlock, token::TokenCache,
-        ChainQuery, FetchFrom, Indexer, InscriptionUpdater, Mempool, Query, Store,
+        exchange_data::ExchangeData, inscription_client::send_inscriptions, precache,
+        schema::InscriptionParseBlock, token::TokenCache, ChainQuery, FetchFrom, Indexer,
+        InscriptionUpdater, Mempool, Query, Store,
     },
     rest,
     signal::Waiter,
@@ -50,6 +52,7 @@ fn fetch_from(config: &Config, store: &Store) -> FetchFrom {
 }
 
 fn run_server(config: Arc<Config>) -> Result<()> {
+    dotenv::dotenv().ok();
     let signal = Waiter::start();
     let metrics = Metrics::new(config.monitoring_addr);
     metrics.start();
@@ -58,9 +61,22 @@ fn run_server(config: Arc<Config>) -> Result<()> {
     let sender = Arc::new(sender);
 
     spawn_thread("inscription_content_receiver", move || {
-        for _ in receiver {
-            // TODO
-        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .enable_io()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let buffer = receiver.try_iter().take(100_000).collect_vec();
+                if !buffer.is_empty() {
+                    dbg!(buffer.len());
+                    send_inscriptions(buffer).await;
+                }
+            }
+        });
     });
 
     let daemon = Arc::new(Daemon::new(

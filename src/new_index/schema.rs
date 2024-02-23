@@ -499,9 +499,16 @@ impl Indexer {
                 // Handle inscriptions in blocks
 
                 let inscriptions =
-                    indexer.handle_blocks(&chunked, &mut token_cache, sender.clone());
+                    indexer.handle_blocks(&chunked, &mut token_cache, /* sender.clone() */);
 
-                indexer.write_inscription(inscriptions).unwrap();
+                indexer.write_inscription(&inscriptions).unwrap();
+
+                inscriptions.into_iter().map(|x| InscriptionContent {
+                    content_type: x.content_type, 
+                    content: x.content, 
+                    inscription_id: x.genesis.into(),
+                    number: x.inscription_number,
+                }).for_each(|x| {sender.send(x).inspect_err(|e| {error!("Send problem {e}")}).ok();});
 
                 // Handle moves in blocks
                 let moves = move_indexer.handle(&chunked, &mut token_cache);

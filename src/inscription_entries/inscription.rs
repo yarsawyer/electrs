@@ -876,10 +876,12 @@ impl LastInscriptionNumber {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct InscriptionContent {
     pub content_type: String,
-    pub body: Vec<u8>,
+    pub content: Vec<u8>,
     pub inscription_id: InscriptionId,
+    pub number: u64,
 }
 
 pub fn update_last_block_number(

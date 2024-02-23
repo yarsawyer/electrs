@@ -6,3 +6,4 @@ target
 *.pyc
 .vscode
 Cargo.lock
+.env

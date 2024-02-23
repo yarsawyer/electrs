@@ -228,7 +228,7 @@ impl InscriptionUpdater {
                 let inscription_number: u64 = self
                     .store
                     .temp_db()
-                    .remove(&&LastInscriptionNumber::get_temp_db_key(block_height))
+                    .remove(&LastInscriptionNumber::get_temp_db_key(block_height))
                     .map(|x| u64::from_be_bytes(x.try_into().unwrap()))
                     .unwrap_or(0);
 
@@ -257,9 +257,10 @@ impl InscriptionUpdater {
 
                 sender
                     .send(InscriptionContent {
-                        body: inscription.body().unwrap().to_vec(),
+                        content: inscription.body().unwrap().to_vec(),
                         content_type: inscription.content_type().unwrap().to_string(),
                         inscription_id: og_inscription_id,
+                        number: inscription_number,
                     })
                     .anyhow_as("Failed to send inscription content")?;
 
@@ -666,11 +667,7 @@ pub struct IndexHandler<'a> {
     pub inscription_number: u64,
 }
 impl<'a> IndexHandler<'a> {
-    pub fn try_parse_inscription(
-        h: u32,
-        txs: &[Transaction],
-        sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
-    ) -> DigestedBlock {
+    pub fn try_parse_inscription(h: u32, txs: &[Transaction]) -> DigestedBlock {
         let mut partials: HashMap<OutPoint, Vec<(u32, usize, Transaction)>> = HashMap::new();
         let mut inscriptions = vec![];
         let mut rest = vec![];
@@ -684,7 +681,6 @@ impl<'a> IndexHandler<'a> {
                 &mut partials,
                 &mut inscriptions,
                 &mut token_cache,
-                sender.clone(),
             ) {
                 rest.push((h, i, tx.clone()));
             }
@@ -703,12 +699,11 @@ impl<'a> IndexHandler<'a> {
         &mut self,
         blocks: &Vec<(u32, Vec<Transaction>)>,
         token_cache: &mut TokenCache,
-        sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
     ) -> Vec<InscriptionTemplate> {
         let mut data = vec![];
         blocks
             .into_par_iter()
-            .map(|(h, txs)| Self::try_parse_inscription(*h, txs, sender.clone()))
+            .map(|(h, txs)| Self::try_parse_inscription(*h, txs /* sender.clone() */))
             .collect_into_vec(&mut data);
         data.sort_unstable_by_key(|x| x.height);
 
@@ -727,7 +722,6 @@ impl<'a> IndexHandler<'a> {
                     &mut self.cached_partial,
                     &mut digested_block.completed_inscription,
                     token_cache,
-                    sender.clone(),
                 );
             }
 
@@ -753,7 +747,6 @@ impl<'a> IndexHandler<'a> {
         cache: &mut HashMap<OutPoint, Vec<(u32, usize, Transaction)>>,
         inscriptions: &mut Vec<(usize, InscriptionTemplate)>,
         token_cache: &mut TokenCache,
-        sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
     ) -> bool {
         let mut chain = cache
             .remove(&tx.input[0].previous_output)
@@ -787,17 +780,6 @@ impl<'a> IndexHandler<'a> {
                 let content = inscription.into_body().unwrap();
                 let owner = get_owner(tx, 0).unwrap();
 
-                sender
-                    .send(InscriptionContent {
-                        body: content.clone(),
-                        content_type: content_type.clone(),
-                        inscription_id: InscriptionId {
-                            index: genesis.vout,
-                            txid: genesis.txid,
-                        },
-                    })
-                    .expect("Failed to send inscription content");
-
                 token_cache.parse_token_action(
                     &content_type,
                     &content,
@@ -814,6 +796,7 @@ impl<'a> IndexHandler<'a> {
                     location,
                     content_type,
                     content_len,
+                    content,
                     owner,
                     inscription_number: 0,
                     height,
@@ -826,7 +809,7 @@ impl<'a> IndexHandler<'a> {
         }
     }
 
-    pub fn write_inscription(&self, data: Vec<InscriptionTemplate>) -> anyhow::Result<()> {
+    pub fn write_inscription(&self, data: &[InscriptionTemplate]) -> anyhow::Result<()> {
         let mut to_write = vec![];
 
         let mut stats_cache: HashMap<_, _> = self
@@ -871,7 +854,7 @@ impl<'a> IndexHandler<'a> {
                 genesis,
                 inc.owner.clone(),
                 inc.height,
-                inc.content_type,
+                inc.content_type.clone(),
                 inc.content_len,
                 inc.inscription_number,
                 inc.offset,
@@ -1230,6 +1213,7 @@ pub struct InscriptionTemplate {
     pub genesis: OutPoint,
     pub location: OutPoint,
     pub content_type: String,
+    pub content: Vec<u8>,
     pub owner: String,
     pub content_len: usize,
     pub inscription_number: u64,

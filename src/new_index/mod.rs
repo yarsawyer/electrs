@@ -1,6 +1,7 @@
 pub mod db;
 pub mod exchange_data;
 mod fetch;
+pub mod inscription_client;
 mod inscriptions_updater;
 mod mempool;
 pub mod precache;

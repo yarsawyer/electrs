@@ -69,6 +69,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indicatif = "0.17.7"
 tracing-indicatif = "0.3.6"
 
+# for password
+dotenv = "0.15.0"
+digest = "0.10.7"
+sha256 = "1.4.0"
+primitive-types = "0.12.2"
+
 # optional dependencies for electrum-discovery
 electrum-client = { version = "0.8", optional = true }
 
