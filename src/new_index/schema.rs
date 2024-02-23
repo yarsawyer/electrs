@@ -1022,11 +1022,10 @@ impl ChainQuery {
             .transpose()
             .anyhow()?
             .unwrap_or_else(|| {
-                let inscriptions: Vec<UtxoValue> = self
+                let inscriptions = self
                     .ords(address.clone(), &OrdsSearcher::New(usize::MAX, None))
                     .into_iter()
-                    .flat_map(|x| x.into_iter().map(UtxoValue::from))
-                    .collect();
+                    .flat_map(|x| x.into_iter().map(UtxoValue::from));
 
                 let mut stats = UserOrdStats::default();
 
@@ -1035,7 +1034,7 @@ impl ChainQuery {
                     stats.amount += i.value;
                 }
 
-                if stats.count > 10_000 {
+                if stats.count > 5_000 {
                     self.store()
                         .inscription_db()
                         .write(vec![stats.to_db_row(&address).unwrap()], DBFlush::Disable);
