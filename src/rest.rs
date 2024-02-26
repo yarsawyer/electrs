@@ -1,11 +1,11 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
 use crate::errors;
-use crate::inscription_entries::inscription::InscriptionExtraData;
+use crate::inscription_entries::inscription::{InscriptionExtraData, Location};
 use crate::inscription_entries::InscriptionId;
 use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::schema::OrdsSearcher;
-use crate::new_index::{compute_script_hash, DBRow, Query, SpendingInput, Utxo};
+use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
 use crate::util::errors::UnwrapPrint;
 use crate::util::{
     create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
@@ -23,7 +23,7 @@ use hex::{self, FromHexError};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Response, Server, StatusCode};
 
-use rocksdb::DB;
+use itertools::Itertools;
 use tokio::sync::oneshot;
 
 use hyperlocal::UnixServerExt;
@@ -311,6 +311,12 @@ pub struct InscriptionMeta {
     pub offset: u64,
 }
 
+pub struct PreInscriptionMeta {
+    pub content_type: String,
+    pub content_length: usize,
+    pub value: u64,
+}
+
 #[derive(Serialize)]
 pub struct UtxoValue {
     txid: Txid,
@@ -320,8 +326,6 @@ pub struct UtxoValue {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(flatten)]
     inscription_meta: Option<InscriptionMeta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    owner: Option<String>,
 }
 impl From<Utxo> for UtxoValue {
     fn from(utxo: Utxo) -> Self {
@@ -331,7 +335,6 @@ impl From<Utxo> for UtxoValue {
             status: TransactionStatus::from(utxo.confirmed),
             value: utxo.value,
             inscription_meta: utxo.inscription_meta,
-            owner: utxo.owner,
         }
     }
 }
@@ -866,11 +869,11 @@ fn handle_request(
             last_seen_txid,
         ) => {
             to_scripthash(script_type, script_str, config.network_type)?;
-            let Some(last_seen_txid) = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok())
+            let Some(last_seen_txid) =
+                last_seen_txid.and_then(|txid| Location::from_hex(txid).ok())
             else {
-                let msg = last_seen_txid.map_or("txid is empty".to_owned(), |x| {
-                    format!("txid is wrong {}", x)
-                });
+                let msg =
+                    last_seen_txid.map_or("txid is empty".to_owned(), |x| format!("error {}", x));
                 return Err(HttpError(StatusCode::UNPROCESSABLE_ENTITY, msg));
             };
             let search = query_params.get("search").map(|x| x.clone());
@@ -1279,20 +1282,16 @@ fn handle_request(
                     .chain()
                     .store()
                     .inscription_db()
-                    .get(&InscriptionExtraData::get_db_key(outpoint))
-                    .map(|x| {
-                        InscriptionExtraData::from_raw(DBRow {
-                            key: InscriptionExtraData::get_db_key(outpoint),
-                            value: x,
-                        })
-                        .unwrap()
-                    });
+                    .iter_scan(&InscriptionExtraData::find_by_outpoint(&outpoint))
+                    .map(|x| InscriptionExtraData::from_raw(x).unwrap())
+                    .collect_vec();
 
-                if let Some(ord) = ord {
-                    json_response(ord, TTL_SHORT)
-                } else {
-                    http_message(StatusCode::NOT_FOUND, "Not found", TTL_SHORT)
-                }
+                json_response(
+                    json!({
+                        "ords": ord
+                    }),
+                    TTL_SHORT,
+                )
             } else {
                 http_message(StatusCode::BAD_REQUEST, "Invalid outpoint", TTL_SHORT)
             }

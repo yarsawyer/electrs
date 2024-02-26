@@ -209,7 +209,6 @@ impl Mempool {
                 value: info.value,
                 confirmed: None,
                 inscription_meta: None,
-                owner: None,
             };
 
             let outpoint = OutPoint::from(&v);

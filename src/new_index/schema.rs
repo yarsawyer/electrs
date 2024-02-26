@@ -15,19 +15,20 @@ use crate::config::{Config, TOKENS_OFFSET};
 use crate::daemon::Daemon;
 use crate::inscription_entries::inscription::{
     update_last_block_number, InscriptionContent, InscriptionExtraData, InscriptionExtraDataValue,
-    LastInscriptionNumber, OrdHistoryRow, PartialTxs, UserOrdStats,
+    LastInscriptionNumber, Location, OrdHistoryRow, PartialTxs, UserOrdStats,
 };
+use crate::inscription_entries::InscriptionId;
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
 use crate::new_index::inscriptions_updater::{IndexHandler, MoveIndexer};
 use crate::new_index::progress::Progress;
 use crate::new_index::token::{TokenCache, TokenTempAction};
-use crate::rest::{InscriptionMeta, UtxoValue};
+use crate::rest::{InscriptionMeta, PreInscriptionMeta, UtxoValue};
 use crate::util::errors::{AsAnyhow, UnwrapPrint};
 use crate::util::{
     bincode_util, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
     BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
 };
-use crate::{errors::*, HEIGHT_DELAY};
+use crate::{errors::*, measure_time, HEIGHT_DELAY};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 use std::path::Path;
@@ -48,7 +49,7 @@ type Limit = usize;
 type SearchInscriptionNumber = Option<String>;
 
 pub enum OrdsSearcher {
-    After(Txid, Limit, SearchInscriptionNumber),
+    After(Location, Limit, SearchInscriptionNumber),
     New(Limit, SearchInscriptionNumber),
 }
 
@@ -142,8 +143,8 @@ impl Store {
     }
 }
 
-type UtxoMap = HashMap<OutPoint, (BlockId, Value, Option<String>)>;
-type UtxoVec = Vec<(OutPoint, (BlockId, Option<String>))>;
+type UtxoMap = HashMap<Location, (BlockId, Value, Option<u64>, Option<InscriptionId>)>;
+type UtxoVec = Vec<(Location, (BlockId, Option<u64>, Option<InscriptionId>))>;
 
 #[derive(Debug)]
 pub struct Utxo {
@@ -152,7 +153,6 @@ pub struct Utxo {
     pub confirmed: Option<BlockId>,
     pub value: Value,
     pub inscription_meta: Option<InscriptionMeta>,
-    pub owner: Option<String>,
 }
 
 impl From<&Utxo> for OutPoint {
@@ -494,26 +494,34 @@ impl Indexer {
             let progress = Progress::begin("Indexing inscriptions blocks", blocks.len() as u64, 0);
 
             for blocks_chunk in blocks.into_iter().chunks(CHUNK_SIZE).into_iter() {
-                let chunked = indexer.load_blocks_chunks(blocks_chunk.collect_vec());
+                let chunked = measure_time!("load chunks": indexer.load_blocks_chunks(blocks_chunk.collect_vec()));
 
                 // Handle inscriptions in blocks
 
-                let inscriptions =
-                    indexer.handle_blocks(&chunked, &mut token_cache, /* sender.clone() */);
+                let inscriptions = measure_time!("handle inscriptions": indexer.handle_blocks(&chunked, &mut token_cache));
 
-                indexer.write_inscription(&inscriptions).unwrap();
+                measure_time!("write inscriptions": indexer.write_inscription(&inscriptions).unwrap());
 
-                inscriptions.into_iter().map(|x| InscriptionContent {
-                    content_type: x.content_type, 
-                    content: x.content, 
-                    inscription_id: x.genesis.into(),
-                    number: x.inscription_number,
-                }).for_each(|x| {sender.send(x).inspect_err(|e| {error!("Send problem {e}")}).ok();});
+                inscriptions
+                    .into_iter()
+                    .map(|x| InscriptionContent {
+                        content_type: x.content_type,
+                        content: x.content,
+                        inscription_id: x.genesis.into(),
+                        number: x.inscription_number,
+                    })
+                    .for_each(|x| {
+                        sender
+                            .send(x)
+                            .inspect_err(|e| error!("Send problem {e}"))
+                            .ok();
+                    });
 
                 // Handle moves in blocks
-                let moves = move_indexer.handle(&chunked, &mut token_cache);
+                let moves =
+                    measure_time!("handle moves": move_indexer.handle(&chunked, &mut token_cache));
 
-                move_indexer.write_moves(moves).unwrap();
+                measure_time!("write moves": move_indexer.write_moves(moves).unwrap());
 
                 token_cache.load_tokens_data(self.store.token_db());
                 token_cache.process_token_actions(None);
@@ -937,20 +945,19 @@ impl ChainQuery {
         // format as Utxo objects
         Ok(newutxos
             .into_iter()
-            .map(|(outpoint, (blockid, value, owner))| {
+            .map(|(location, (blockid, value, ..))| {
                 // in elements/liquid chains, we have to lookup the txo in order to get its
                 // associated asset. the asset information could be kept in the db history rows
                 // alongside the value to avoid this.
                 #[cfg(feature = "liquid")]
-                let txo = self.lookup_txo(&outpoint).expect("missing utxo");
+                let txo = self.lookup_txo(&location).expect("missing utxo");
 
                 Utxo {
-                    txid: outpoint.txid,
-                    vout: outpoint.vout,
+                    txid: location.outpoint.txid,
+                    vout: location.outpoint.vout,
                     value,
                     confirmed: Some(blockid),
                     inscription_meta: None,
-                    owner,
 
                     #[cfg(feature = "liquid")]
                     asset: txo.asset,
@@ -995,17 +1002,27 @@ impl ChainQuery {
                     let is_inscription = self
                         .store
                         .inscription_db()
-                        .get(&InscriptionExtraData::get_db_key(OutPoint {
+                        .iter_scan(&InscriptionExtraData::find_by_outpoint(&OutPoint {
                             txid: Txid::from_slice(&info.txid).unwrap(),
                             vout: info.vout as u32,
                         }))
+                        .next()
                         .is_some();
                     if !is_inscription {
-                        utxos.insert(history.get_funded_outpoint(), (blockid, info.value, None));
+                        utxos.insert(
+                            Location {
+                                offset: 0,
+                                outpoint: history.get_funded_outpoint(),
+                            },
+                            (blockid, info.value, None, None),
+                        );
                     }
                 }
                 TxHistoryInfo::Spending(_) => {
-                    utxos.remove(&history.get_funded_outpoint());
+                    utxos.remove(&Location {
+                        offset: 0,
+                        outpoint: history.get_funded_outpoint(),
+                    });
                 }
                 #[cfg(feature = "liquid")]
                 TxHistoryInfo::Issuing(_)
@@ -1128,7 +1145,7 @@ impl ChainQuery {
         let extras = {
             let keys = newutxos
                 .iter()
-                .map(|x| InscriptionExtraData::get_db_key(x.0))
+                .map(|x| InscriptionExtraData::get_db_key(x.0.clone()))
                 .collect_vec();
 
             self.store()
@@ -1139,24 +1156,27 @@ impl ChainQuery {
                 .flatten()
                 .flatten()
                 .map(|x| InscriptionExtraDataValue::from_raw(x).unwrap())
-                .map(|x| InscriptionMeta {
+                .map(|x| PreInscriptionMeta {
                     content_length: x.content_length,
                     content_type: x.content_type,
-                    inscription_id: x.genesis.into(),
-                    inscription_number: x.number,
                     value: x.value,
-                    offset: x.offset,
                 })
         };
 
-        for ((outpoint, (blockid, owner)), extra) in newutxos.into_iter().zip(extras) {
+        for ((location, (blockid, inc_number, inc_id)), extra) in newutxos.into_iter().zip(extras) {
             values.push(Utxo {
-                txid: outpoint.txid,
-                vout: outpoint.vout,
+                txid: location.outpoint.txid,
+                vout: location.outpoint.vout,
                 value: extra.value,
                 confirmed: Some(blockid),
-                inscription_meta: Some(extra),
-                owner,
+                inscription_meta: Some(InscriptionMeta {
+                    inscription_id: inc_id.unwrap(),
+                    inscription_number: inc_number.unwrap(),
+                    content_length: extra.content_length,
+                    content_type: extra.content_type,
+                    offset: location.offset,
+                    value: extra.value,
+                }),
             });
         }
         Ok(values)
@@ -1167,18 +1187,21 @@ impl ChainQuery {
         history_iter: impl Iterator<Item = OrdHistoryRow>,
         limit: usize,
     ) -> Result<UtxoVec> {
-        //let mut utxos = ords_utxo;
         let mut utxos = Vec::new();
 
         let history_iter = history_iter.filter_map(|history| {
-            self.tx_confirming_block(&history.get_outpoint().txid)
+            self.tx_confirming_block(&history.get_location().outpoint.txid)
                 .map(|b| (history, b))
         });
 
         for (history, blockid) in history_iter {
             utxos.push((
-                history.get_outpoint(),
-                (blockid, Some(history.get_address())),
+                history.get_location(),
+                (
+                    blockid,
+                    Some(history.value.inscription_number),
+                    Some(history.value.inscription_id),
+                ),
             ));
 
             if utxos.len() == limit {
@@ -1194,7 +1217,7 @@ impl ChainQuery {
         let _timer = self.start_timer("ords_utxo");
 
         match searcher {
-            OrdsSearcher::After(last_seen_txid, limit, search) => {
+            OrdsSearcher::After(last_seen_location, limit, search) => {
                 let history_iter = self
                     .ord_iter_scan_reverse(scripthash)
                     .map(OrdHistoryRow::from_row)
@@ -1205,7 +1228,7 @@ impl ChainQuery {
                         }
                         None => true,
                     })
-                    .skip_while(|history| last_seen_txid != &history.get_outpoint().txid) // skip until we reach the last_seen_txid
+                    .skip_while(|history| last_seen_location != &history.get_location()) // skip until we reach the last_seen_txid
                     .skip(1); // skip last_seen_txid
                 self.ords_iter(history_iter, *limit)
             }
@@ -2172,7 +2195,7 @@ impl StatsCacheRow {
     }
 }
 
-type CachedUtxoMap = HashMap<(Txid, u32), (u32, Value, Option<String>)>; // (txid,vout) => (block_height,output_value)
+type CachedUtxoMap = HashMap<(Txid, u32), (u32, Value, Option<u64>, Option<InscriptionId>)>; // (txid,vout) => (block_height,output_value,inscription_number,inscription_id)
 
 struct UtxoCacheRow {
     key: ScriptCacheKey,
@@ -2209,10 +2232,10 @@ impl UtxoCacheRow {
 fn make_utxo_cache(utxos: &UtxoMap) -> CachedUtxoMap {
     utxos
         .iter()
-        .map(|(outpoint, (blockid, value, address))| {
+        .map(|(location, (blockid, value, number, inc_id))| {
             (
-                (outpoint.txid, outpoint.vout),
-                (blockid.height as u32, *value, address.clone()),
+                (location.outpoint.txid, location.outpoint.vout),
+                (blockid.height as u32, *value, *number, inc_id.clone()),
             )
         })
         .collect()
@@ -2221,12 +2244,18 @@ fn make_utxo_cache(utxos: &UtxoMap) -> CachedUtxoMap {
 fn from_utxo_cache(utxos_cache: CachedUtxoMap, chain: &ChainQuery) -> UtxoMap {
     utxos_cache
         .into_iter()
-        .map(|((txid, vout), (height, value, address))| {
+        .map(|((txid, vout), (height, value, inc_number, inc_id))| {
             let outpoint = OutPoint { txid, vout };
             let blockid = chain
                 .blockid_by_height(height as usize)
                 .expect("missing blockheader for valid utxo cache entry");
-            (outpoint, (blockid, value, address))
+            (
+                Location {
+                    offset: 0,
+                    outpoint,
+                },
+                (blockid, value, inc_number, inc_id),
+            )
         })
         .collect()
 }

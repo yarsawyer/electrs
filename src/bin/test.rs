@@ -76,7 +76,5 @@ fn main() -> anyhow::Result<()> {
 
     // let shit = InscriptionExtraData::from_raw(DBRow { key, value: shit }).unwrap();
 
-    // dbg!(shit);
-
     Ok(())
 }

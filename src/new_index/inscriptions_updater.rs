@@ -6,8 +6,8 @@ use crate::{
         index::PARTIAL_TXID_TO_TXIDS,
         inscription::{
             update_last_block_number, Inscription, InscriptionContent, InscriptionExtraData,
-            LastInscriptionNumber, OrdHistoryRow, OrdHistoryValue, ParsedInscription, PartialTxs,
-            UserOrdStats,
+            LastInscriptionNumber, Location, OrdHistoryKey, OrdHistoryRow, OrdHistoryValue,
+            ParsedInscription, PartialTxs, UserOrdStats,
         },
         InscriptionId,
     },
@@ -22,6 +22,8 @@ use itertools::Itertools;
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
+use std::collections::BTreeMap;
+use std::ops::Bound::Included;
 
 use super::{
     schema::{BlockRow, TxRow},
@@ -49,26 +51,18 @@ impl InscriptionUpdater {
         let txid = tx.txid();
 
         for (idx, input) in tx.input.iter().enumerate() {
-            let previous_tx = input.previous_output;
-            let previous_txid = previous_tx.txid;
-
-            let prev_outpoint = OutPoint {
-                txid: previous_txid,
-                vout: previous_tx.vout,
-            };
-
-            if let Some(mut inscription_extra) = self
+            for (key, mut inscription_extra) in self
                 .store
                 .inscription_db()
-                .remove(&InscriptionExtraData::get_db_key(prev_outpoint))
-                .map(|x| {
-                    InscriptionExtraData::from_raw(DBRow {
-                        key: InscriptionExtraData::get_db_key(prev_outpoint),
-                        value: x,
-                    })
-                })
-                .transpose()?
+                .iter_scan(&InscriptionExtraData::find_by_outpoint(
+                    &input.previous_output,
+                ))
+                .map(|x| (x.key.clone(), InscriptionExtraData::from_raw(x).unwrap()))
             {
+                self.store.inscription_db().remove(&key);
+
+                let prev_location = inscription_extra.location.clone();
+
                 let old_owner = inscription_extra.value.owner.clone();
 
                 let mut to_temp_write = vec![];
@@ -86,30 +80,28 @@ impl InscriptionUpdater {
                     to_write.push(v.to_db_row(&old_owner).unwrap());
                 }
 
-                to_temp_write.push(inscription_extra.to_temp_db_row(block_height, &previous_tx)?);
+                to_temp_write.push(inscription_extra.to_temp_db_row(block_height, &prev_location)?);
 
                 let inputs_cum = InscriptionSearcher::calc_offsets(&tx, &txos).unwrap();
 
                 // Work with old user
                 let prev_history_value = {
+                    let key = OrdHistoryRow::create_db_key(old_owner.clone(), &prev_location);
+
                     let prev_history_value = self
                         .store
                         .inscription_db()
-                        .remove(&OrdHistoryRow::create_db_key(
-                            old_owner.clone(),
-                            &prev_outpoint,
-                        ))
+                        .remove(&key)
                         .map(|x| OrdHistoryRow::value_from_raw(&x))
                         .anyhow_as("Failed to find OrdHistoryRow")?;
 
-                    to_temp_write.push(DBRow {
-                        key: OrdHistoryRow::get_temp_db_key(
-                            old_owner,
-                            &prev_outpoint,
-                            block_height,
-                        ),
-                        value: prev_history_value.get_raw(),
-                    });
+                    to_temp_write.push(
+                        OrdHistoryRow {
+                            key: OrdHistoryKey::from_raw(key)?,
+                            value: prev_history_value.clone(),
+                        }
+                        .to_temp_db_row(block_height),
+                    );
 
                     prev_history_value
                 };
@@ -122,7 +114,7 @@ impl InscriptionUpdater {
                     inputs_cum
                         .get(idx)
                         .copied()
-                        .map(|x| x + inscription_extra.value.offset),
+                        .map(|x| x + inscription_extra.location.offset),
                     &tx.output,
                 ) else {
                     inscription_extra.value.owner = "leaked 😭".to_owned();
@@ -130,7 +122,7 @@ impl InscriptionUpdater {
                     token_cache.try_transfer(
                         block_height,
                         tx_idx,
-                        prev_outpoint,
+                        prev_location.outpoint,
                         "leaked".to_string(),
                     );
 
@@ -142,7 +134,10 @@ impl InscriptionUpdater {
                     continue;
                 };
 
-                let new_outpoint = OutPoint { txid, vout };
+                let new_outpoint = Location {
+                    offset,
+                    outpoint: OutPoint { txid, vout },
+                };
 
                 // Work with new user
                 let ord_history = {
@@ -168,17 +163,16 @@ impl InscriptionUpdater {
                     token_cache.try_transfer(
                         block_height,
                         tx_idx,
-                        prev_outpoint,
+                        prev_location.outpoint,
                         new_owner.clone(),
                     );
 
-                    OrdHistoryRow::new(new_owner, new_outpoint, prev_history_value)
+                    OrdHistoryRow::new(new_owner, new_outpoint.clone(), prev_history_value)
                 };
 
-                to_write.push(ord_history.into_row());
+                to_write.push(ord_history.to_db_row());
 
                 inscription_extra.location = new_outpoint;
-                inscription_extra.value.offset = offset;
 
                 to_write.push(inscription_extra.to_db_row()?);
 
@@ -187,7 +181,7 @@ impl InscriptionUpdater {
                     .write(to_write, super::db::DBFlush::Disable);
 
                 return Ok(0);
-            };
+            }
         }
 
         let txs = load_partials(&self.store, tx.clone(), block_height, true);
@@ -213,7 +207,10 @@ impl InscriptionUpdater {
                     index: 0,
                 };
 
-                let location = OutPoint { txid, vout: 0 };
+                let location = Location {
+                    offset: 0,
+                    outpoint: OutPoint { txid, vout: 0 },
+                };
 
                 let genesis = OutPoint {
                     txid: og_inscription_id.txid,
@@ -234,7 +231,7 @@ impl InscriptionUpdater {
 
                 let new_row = OrdHistoryRow::new(
                     owner.clone(),
-                    location,
+                    location.clone(),
                     OrdHistoryValue {
                         inscription_id: og_inscription_id,
                         inscription_number,
@@ -244,14 +241,11 @@ impl InscriptionUpdater {
                 let new_inc_n = LastInscriptionNumber::new(inscription_number + 1);
 
                 let inscription_extra = InscriptionExtraData::new(
-                    location,
-                    genesis,
+                    location.clone(),
                     owner.clone(),
                     block_height,
                     inscription.content_type().unwrap().to_string(),
                     inscription.content_length().unwrap(),
-                    inscription_number,
-                    0,
                     tx.output[0].value,
                 );
 
@@ -264,7 +258,7 @@ impl InscriptionUpdater {
                     })
                     .anyhow_as("Failed to send inscription content")?;
 
-                let mut to_write = vec![new_row.into_row(), inscription_extra.to_db_row()?];
+                let mut to_write = vec![new_row.to_db_row(), inscription_extra.to_db_row()?];
 
                 if let Some(mut v) = self
                     .store
@@ -285,7 +279,7 @@ impl InscriptionUpdater {
                     tx_idx,
                     owner,
                     genesis,
-                    location,
+                    location.outpoint,
                     Some(self.store.temp_db()),
                 );
 
@@ -339,41 +333,35 @@ impl InscriptionUpdater {
         };
 
         for (idx, input) in tx.input.iter().enumerate() {
-            let Some(inscription_extra) = ({
+            let inscriptions = {
                 let key = mempool_inscriptions
                     .remove(&input.previous_output)
                     .unwrap_or(input.previous_output);
 
                 inscription_db
-                    .get(&InscriptionExtraData::get_db_key(key))
-                    .map(|x| {
-                        InscriptionExtraData::from_raw(DBRow {
-                            key: InscriptionExtraData::get_db_key(key),
-                            value: x,
-                        })
-                    })
-                    .transpose()?
-            }) else {
-                continue;
+                    .iter_scan(&InscriptionExtraData::find_by_outpoint(&key))
+                    .map(|x| InscriptionExtraData::from_raw(x).unwrap())
             };
 
-            if let Result::Ok((vout, _)) = InscriptionSearcher::get_output_index_by_input(
-                inputs_cum
-                    .get(idx)
-                    .copied()
-                    .map(|x| x + inscription_extra.value.offset),
-                &tx.output,
-            ) {
-                mempool_inscriptions.insert(
-                    OutPoint {
-                        txid: tx.txid(),
-                        vout,
-                    },
-                    input.previous_output,
-                );
-            } else {
-                continue;
-            };
+            for inscription_extra in inscriptions {
+                if let Result::Ok((vout, _)) = InscriptionSearcher::get_output_index_by_input(
+                    inputs_cum
+                        .get(idx)
+                        .copied()
+                        .map(|x| x + inscription_extra.location.offset),
+                    &tx.output,
+                ) {
+                    mempool_inscriptions.insert(
+                        OutPoint {
+                            txid: tx.txid(),
+                            vout,
+                        },
+                        input.previous_output,
+                    );
+                } else {
+                    continue;
+                };
+            }
         }
         Ok(())
     }
@@ -487,7 +475,7 @@ impl InscriptionUpdater {
                             InscriptionExtraData::from_temp_db(x).unwrap(),
                         )
                     })
-                    .for_each(|(key, (extra, _))| {
+                    .for_each(|(key, extra)| {
                         if let Some(mut v) = self
                             .store
                             .inscription_db()
@@ -524,7 +512,7 @@ impl InscriptionUpdater {
                                 .unwrap()
                             });
                             if let Some((history_row, _)) = history_row {
-                                to_restore.push(history_row.into_row());
+                                to_restore.push(history_row.to_db_row());
                             }
                         }
                     });
@@ -548,17 +536,13 @@ impl InscriptionUpdater {
 
                     // Main db flow
                     {
-                        let extra_key = InscriptionExtraData::get_db_key(outpoint);
-                        let history_key = OrdHistoryRow::create_db_key(owner, &outpoint);
+                        let extra_key = InscriptionExtraData::find_by_outpoint(&outpoint);
 
-                        if let Some(extra) =
-                            self.store.inscription_db().remove(&extra_key).map(|x| {
-                                InscriptionExtraData::from_raw(DBRow {
-                                    key: extra_key,
-                                    value: x,
-                                })
-                                .unwrap()
-                            })
+                        for extra in self
+                            .store
+                            .inscription_db()
+                            .iter_scan(&extra_key)
+                            .map(|x| InscriptionExtraData::from_raw(x).unwrap())
                         {
                             if let Some(mut v) = self
                                 .store
@@ -575,7 +559,10 @@ impl InscriptionUpdater {
                                 );
                             }
 
-                            self.store.inscription_db().db.delete(&history_key).unwrap();
+                            self.store.inscription_db().delete_batch(vec![
+                                extra.to_db_row().unwrap().key,
+                                OrdHistoryRow::create_db_key(owner.clone(), &extra.location),
+                            ]);
                         }
                     }
                 }
@@ -615,7 +602,7 @@ impl InscriptionUpdater {
         {
             let key = i.key.clone();
             let (height, _) = TokenTempAction::from_db_row(i);
-            if height <= block_height + HEIGHT_DELAY - TOKENS_OFFSET {
+            if height < block_height + HEIGHT_DELAY - TOKENS_OFFSET {
                 to_delete.push(key);
             }
         }
@@ -703,7 +690,7 @@ impl<'a> IndexHandler<'a> {
         let mut data = vec![];
         blocks
             .into_par_iter()
-            .map(|(h, txs)| Self::try_parse_inscription(*h, txs /* sender.clone() */))
+            .map(|(h, txs)| Self::try_parse_inscription(*h, txs))
             .collect_into_vec(&mut data);
         data.sort_unstable_by_key(|x| x.height);
 
@@ -767,7 +754,7 @@ impl<'a> IndexHandler<'a> {
                 true
             }
             ParsedInscription::Complete(inscription) => {
-                let location = OutPoint {
+                let outpoint = OutPoint {
                     txid: tx.txid(),
                     vout: 0,
                 };
@@ -787,13 +774,16 @@ impl<'a> IndexHandler<'a> {
                     idx,
                     owner.clone(),
                     genesis,
-                    location,
+                    outpoint,
                     None,
                 );
 
                 let inscription_template = InscriptionTemplate {
                     genesis,
-                    location,
+                    location: Location {
+                        offset: 0,
+                        outpoint,
+                    },
                     content_type,
                     content_len,
                     content,
@@ -801,15 +791,15 @@ impl<'a> IndexHandler<'a> {
                     inscription_number: 0,
                     height,
                     value: tx.output[0].value,
-                    offset: 0,
                 };
                 inscriptions.push((idx, inscription_template));
+
                 true
             }
         }
     }
 
-    pub fn write_inscription(&self, data: &[InscriptionTemplate]) -> anyhow::Result<()> {
+    pub fn write_inscription(&self, data: &Vec<InscriptionTemplate>) -> anyhow::Result<()> {
         let mut to_write = vec![];
 
         let mut stats_cache: HashMap<_, _> = self
@@ -818,8 +808,7 @@ impl<'a> IndexHandler<'a> {
             .db
             .multi_get(
                 data.iter()
-                    .map(|x| UserOrdStats::get_db_key(&x.owner).unwrap())
-                    .collect_vec(),
+                    .map(|x| UserOrdStats::get_db_key(&x.owner).unwrap()),
             )
             .into_iter()
             .flatten()
@@ -835,11 +824,11 @@ impl<'a> IndexHandler<'a> {
 
         for inc in data {
             let genesis = inc.genesis;
-            let location = inc.location;
+            let location = inc.location.clone();
 
             let new_row = OrdHistoryRow::new(
                 inc.owner.clone(),
-                location,
+                location.clone(),
                 OrdHistoryValue {
                     inscription_id: InscriptionId {
                         txid: genesis.txid,
@@ -851,13 +840,10 @@ impl<'a> IndexHandler<'a> {
 
             let inscription_extra = InscriptionExtraData::new(
                 location,
-                genesis,
                 inc.owner.clone(),
                 inc.height,
                 inc.content_type.clone(),
                 inc.content_len,
-                inc.inscription_number,
-                inc.offset,
                 inc.value,
             );
 
@@ -866,7 +852,7 @@ impl<'a> IndexHandler<'a> {
                 v.count += 1;
             }
 
-            to_write.push(new_row.into_row());
+            to_write.push(new_row.to_db_row());
             to_write.push(inscription_extra.to_db_row()?);
         }
 
@@ -970,50 +956,39 @@ pub struct MoveIndexer<'a> {
     pub cached_transfer: HashMap<OutPoint, (String, TransferProto)>,
 }
 impl<'a> MoveIndexer<'a> {
-    pub fn load_inscription(&self, txs: &[Transaction]) -> Vec<(OutPoint, MovedInscription)> {
-        let mut outpoints = vec![];
-        for tx in txs {
-            outpoints.extend(
-                tx.input
-                    .iter()
-                    .map(|x| InscriptionExtraData::get_db_key(x.previous_output)),
-            );
-        }
-
-        self.store
-            .inscription_db()
-            .db
-            .multi_get(&outpoints)
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, x)| x.unwrap().map(|x| (i, x)))
-            .map(|(i, x)| {
-                InscriptionExtraData::from_raw(DBRow {
-                    key: outpoints[i].clone(),
-                    value: x,
+    pub fn load_inscription(&self, txs: &[Transaction]) -> Vec<(Location, MovedInscription)> {
+        txs.into_par_iter()
+            .flat_map_iter(|x| {
+                x.input.iter().map(|x| x.previous_output).flat_map(|x| {
+                    self.store
+                        .inscription_db()
+                        .iter_scan(&InscriptionExtraData::find_by_outpoint(&x))
+                        .map(|x| InscriptionExtraData::from_raw(x).unwrap())
+                        .map(|x| {
+                            (
+                                x.location.clone(),
+                                MovedInscription {
+                                    data: x,
+                                    leaked: false,
+                                    new_owner: None,
+                                },
+                            )
+                        })
                 })
-                .unwrap()
             })
-            .map(|x| {
-                (
-                    x.location,
-                    MovedInscription {
-                        data: x,
-                        leaked: false,
-                        new_owner: None,
-                    },
-                )
-            })
-            .collect_vec()
+            .collect()
     }
 
     pub fn handle(
         &mut self,
         blocks: &Vec<(u32, Vec<Transaction>)>,
         token_cache: &mut TokenCache,
-    ) -> HashMap<OutPoint, MovedInscription> {
+    ) -> HashMap<Location, MovedInscription> {
         let mut temp = vec![];
-        blocks
+
+        use crate::measure_time;
+
+        measure_time!("loading blocks for handle moves": blocks
             .par_iter()
             .map(|(_, txs)| {
                 (
@@ -1021,14 +996,16 @@ impl<'a> MoveIndexer<'a> {
                     self.load_inscription(txs),
                 )
             })
-            .collect_into_vec(&mut temp);
+            .collect_into_vec(&mut temp));
 
         let mut txos = HashMap::new();
-        let mut inscriptions: HashMap<OutPoint, MovedInscription> = HashMap::new();
+        let mut inscriptions: BTreeMap<Location, MovedInscription> = BTreeMap::new();
 
         for (tx_outs, inc) in temp {
             txos.extend(tx_outs.into_iter().map(|x| (x.0, x.1)));
-            inscriptions.extend(inc);
+            for (loc, inc) in inc {
+                inscriptions.insert(loc, inc);
+            }
         }
 
         if inscriptions.is_empty() {
@@ -1046,10 +1023,33 @@ impl<'a> MoveIndexer<'a> {
                     .input
                     .iter()
                     .enumerate()
-                    .map(|(idx, x)| (idx, inscriptions.remove(&x.previous_output)))
-                    .filter_map(|x| {
-                        let Some(inc) = x.1 else { return None };
-                        Some((x.0, inc))
+                    .flat_map(|(idx, x)| {
+                        let keys = inscriptions
+                            .range((
+                                Included(Location {
+                                    outpoint: x.previous_output,
+                                    offset: 0,
+                                }),
+                                Included(Location {
+                                    outpoint: x.previous_output,
+                                    offset: u64::MAX,
+                                }),
+                            ))
+                            .map(|x| x.0)
+                            .cloned()
+                            .collect_vec();
+
+                        let mut res = vec![];
+
+                        for location in keys {
+                            res.push((
+                                idx,
+                                location.offset,
+                                inscriptions.remove(&location).unwrap(),
+                            ))
+                        }
+
+                        res.into_iter()
                     })
                     .collect_vec();
 
@@ -1059,32 +1059,33 @@ impl<'a> MoveIndexer<'a> {
 
                 let inputs_cum = InscriptionSearcher::calc_offsets(tx, &txos).unwrap();
 
-                for (idx, mut inc) in found_inscriptions {
+                for (idx, current_offset, mut inc) in found_inscriptions {
                     let Result::Ok((vout, offset)) = InscriptionSearcher::get_output_index_by_input(
-                        inputs_cum
-                            .get(idx)
-                            .copied()
-                            .map(|x| x + inc.data.value.offset),
+                        inputs_cum.get(idx).copied().map(|x| x + current_offset),
                         &tx.output,
                     ) else {
                         if inc.new_owner.is_none() {
                             token_cache.try_transfer(
                                 *height,
                                 idx,
-                                inc.data.location,
+                                inc.data.location.outpoint,
                                 "leaked".to_owned(),
                             );
                         }
+
                         inc.leaked = true;
-                        inscriptions.insert(inc.data.location, inc);
+                        inscriptions.insert(inc.data.location.clone(), inc);
+
                         continue;
                     };
 
-                    inc.data.value.offset = offset;
                     inc.data.value.value = tx.output[vout as usize].value;
-                    let location = OutPoint {
-                        txid: tx.txid(),
-                        vout,
+                    let location = Location {
+                        offset,
+                        outpoint: OutPoint {
+                            txid: tx.txid(),
+                            vout,
+                        },
                     };
 
                     let new_owner = get_owner(tx, vout as usize).unwrap();
@@ -1092,7 +1093,7 @@ impl<'a> MoveIndexer<'a> {
                         token_cache.try_transfer(
                             *height,
                             idx,
-                            inc.data.location,
+                            inc.data.location.outpoint,
                             new_owner.clone(),
                         );
                     }
@@ -1103,10 +1104,10 @@ impl<'a> MoveIndexer<'a> {
             }
         }
 
-        inscriptions
+        inscriptions.into_iter().collect()
     }
 
-    pub fn write_moves(&self, data: HashMap<OutPoint, MovedInscription>) -> anyhow::Result<()> {
+    pub fn write_moves(&self, data: HashMap<Location, MovedInscription>) -> anyhow::Result<()> {
         let mut to_write = vec![];
 
         let keys = {
@@ -1138,7 +1139,9 @@ impl<'a> MoveIndexer<'a> {
                 continue;
             }
 
-            let old_location = inc.data.location;
+            let old_location = inc.data.location.clone();
+            let key = InscriptionExtraData::get_db_key(old_location.clone());
+
             let old_owner = inc.data.value.owner.clone();
 
             if let Some(v) = stats_cache.get_mut(&old_owner) {
@@ -1146,16 +1149,13 @@ impl<'a> MoveIndexer<'a> {
                 v.count -= 1;
             }
 
-            inc.data.location = new_location;
+            inc.data.location = new_location.clone();
             if inc.leaked {
                 inc.data.value.owner = "leaked 😭".to_owned();
             }
 
             let prev_history_value = {
-                self.store
-                    .inscription_db()
-                    .db
-                    .delete(&InscriptionExtraData::get_db_key(old_location))?;
+                self.store.inscription_db().db.delete(&key)?;
                 self.store
                     .inscription_db()
                     .remove(&OrdHistoryRow::create_db_key(
@@ -1177,7 +1177,7 @@ impl<'a> MoveIndexer<'a> {
                 let new_ord_history =
                     OrdHistoryRow::new(new_owner, new_location, prev_history_value);
 
-                to_write.push(new_ord_history.into_row());
+                to_write.push(new_ord_history.to_db_row());
             }
 
             to_write.push(inc.data.to_db_row()?);
@@ -1211,18 +1211,17 @@ pub struct DigestedMoves {
 }
 pub struct InscriptionTemplate {
     pub genesis: OutPoint,
-    pub location: OutPoint,
+    pub location: Location,
     pub content_type: String,
-    pub content: Vec<u8>,
     pub owner: String,
     pub content_len: usize,
     pub inscription_number: u64,
     pub value: u64,
     pub height: u32,
-    pub offset: u64,
+    pub content: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MovedInscription {
     pub data: InscriptionExtraData,
     pub new_owner: Option<String>,
@@ -1352,7 +1351,9 @@ macro_rules! measure_time {
     ($n:literal: $e:expr) => {{
         let time = std::time::Instant::now();
         let a = $e;
-        tracing::warn!("{}: {:.3} s", $n, time.elapsed().as_secs_f32());
+        if time.elapsed().as_secs_f32() > 2.0 {
+            tracing::warn!("{}: {:.3} s", $n, time.elapsed().as_secs_f32());
+        }
         a
     }};
 }
