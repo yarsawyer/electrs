@@ -72,7 +72,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 let buffer = receiver.try_iter().take(100_000).collect_vec();
                 if !buffer.is_empty() {
-                    send_inscriptions(buffer).await;
+                    // send_inscriptions(buffer).await;
                 }
             }
         });
