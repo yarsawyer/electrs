@@ -933,4 +933,13 @@ impl Location {
         ))
         .anyhow_as("Cannot serialize Location")
     }
+
+    pub fn to_string(&self) -> String {
+        format!(
+            "{}i{}i{}",
+            self.outpoint.txid.to_string(),
+            self.outpoint.vout,
+            self.offset
+        )
+    }
 }

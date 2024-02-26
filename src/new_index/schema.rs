@@ -1225,7 +1225,7 @@ impl ChainQuery {
                         Some(v) => {
                             x.value.inscription_id.to_string().starts_with(v)
                                 || x.value.inscription_number.to_string().starts_with(v)
-                                || x.key.location.outpoint.txid.to_string().starts_with(v)
+                                || x.key.location.to_string().starts_with(v)
                         }
                         None => true,
                     })
@@ -1241,7 +1241,7 @@ impl ChainQuery {
                         Some(v) => {
                             x.value.inscription_id.to_string().starts_with(v)
                                 || x.value.inscription_number.to_string().starts_with(v)
-                                || x.key.location.outpoint.txid.to_string().starts_with(v)
+                                || x.key.location.to_string().starts_with(v)
                         }
                         None => true,
                     });
