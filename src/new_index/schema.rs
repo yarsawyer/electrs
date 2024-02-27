@@ -506,7 +506,7 @@ impl Indexer {
                     .into_iter()
                     .map(|x| InscriptionContent {
                         content_type: x.content_type,
-                        content: x.content,
+                        content: base64::encode(x.content),
                         inscription_id: x.genesis.into(),
                         number: x.inscription_number,
                     })

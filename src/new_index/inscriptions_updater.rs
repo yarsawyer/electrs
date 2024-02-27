@@ -258,7 +258,7 @@ impl InscriptionUpdater {
 
                 sender
                     .send(InscriptionContent {
-                        content: inscription.body().unwrap().to_vec(),
+                        content: base64::encode(inscription.body().unwrap()),
                         content_type: inscription.content_type().unwrap().to_string(),
                         inscription_id: og_inscription_id,
                         number: inscription_number,

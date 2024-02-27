@@ -828,7 +828,7 @@ impl LastInscriptionNumber {
 #[derive(Serialize, Deserialize)]
 pub struct InscriptionContent {
     pub content_type: String,
-    pub content: Vec<u8>,
+    pub content: String,
     pub inscription_id: InscriptionId,
     pub number: u64,
 }
