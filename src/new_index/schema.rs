@@ -15,11 +15,12 @@ use crate::config::{Config, TOKENS_OFFSET};
 use crate::daemon::Daemon;
 use crate::inscription_entries::inscription::{
     update_last_block_number, InscriptionContent, InscriptionExtraData, InscriptionExtraDataValue,
-    LastInscriptionNumber, Location, OrdHistoryRow, PartialTxs, UserOrdStats,
+    LastInscriptionNumber, LeakedInscriptions, Location, OrdHistoryRow, PartialTxs, UserOrdStats,
 };
 use crate::inscription_entries::InscriptionId;
 use crate::metrics::{Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics};
-use crate::new_index::inscriptions_updater::{IndexHandler, MoveIndexer};
+use crate::new_index::main_updater::IndexHandler;
+use crate::new_index::move_updater::MoveIndexer;
 use crate::new_index::progress::Progress;
 use crate::new_index::token::{TokenCache, TokenTempAction};
 use crate::rest::{InscriptionMeta, PreInscriptionMeta, UtxoValue};
@@ -37,7 +38,7 @@ use std::sync::Arc;
 use crate::new_index::db::{DBFlush, DBRow, ReverseScanIterator, ScanIterator, DB};
 use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
 
-use super::inscriptions_updater::{load_txos, InscriptionUpdater};
+use super::temp_updater::{load_txos, InscriptionUpdater};
 use super::token::{
     TokenAccountKey, TokenAccountValue, TokenBalance, TokenTransfer, TokenTransferKey,
     TokenTransferValue, TransferProto,
@@ -433,7 +434,14 @@ impl Indexer {
 
             let txos = txos.into_iter().map(|x| (x.0, x.1)).collect();
 
+            let mut leaked_inscriptions = None;
+
             for (i, tx) in txs.into_iter().enumerate() {
+                if tx.is_coin_base() {
+                    leaked_inscriptions = Some(LeakedInscriptions::new(tx));
+                    continue;
+                }
+
                 inscription_updater.index_transaction_inscriptions(
                     tx,
                     i,
@@ -441,8 +449,72 @@ impl Indexer {
                     &txos,
                     token_cache,
                     sender.clone(),
+                    leaked_inscriptions.as_mut().unwrap(),
                 )?;
             }
+
+            let mut to_write = vec![];
+            let mut to_temp_write = vec![];
+
+            for (location, mut inc) in leaked_inscriptions.unwrap().get_leaked_inscriptions() {
+                let new_owner = inc.new_owner.as_ref().unwrap().clone();
+                let old_owner = inc.data.value.owner.clone();
+
+                token_cache.try_transfer(
+                    block_number as u32,
+                    0,
+                    location.outpoint,
+                    new_owner.clone(),
+                );
+
+                let ord_history = {
+                    let key = OrdHistoryRow::create_db_key(&old_owner, &inc.data.location);
+
+                    let prev_history_value = self
+                        .store
+                        .inscription_db()
+                        .remove(&key)
+                        .map(|x| OrdHistoryRow::value_from_raw(&x))
+                        .anyhow_as("Failed to find OrdHistoryRow")?;
+
+                    to_temp_write.push(
+                        OrdHistoryRow::new(
+                            old_owner.clone(),
+                            inc.data.location.clone(),
+                            prev_history_value.clone(),
+                        )
+                        .to_temp_db_row(block_number as u32),
+                    );
+
+                    inc.data.value.owner = inc.new_owner.unwrap();
+
+                    if let Some(mut v) = self
+                        .store
+                        .inscription_db()
+                        .get(&UserOrdStats::get_db_key(&new_owner).unwrap())
+                        .map(|x| UserOrdStats::from_raw(&x).unwrap())
+                    {
+                        v.amount += inc.data.value.value;
+                        v.count += 1;
+
+                        to_write.push(v.to_db_row(&new_owner)?);
+                    }
+
+                    OrdHistoryRow::new(new_owner, location.clone(), prev_history_value)
+                };
+
+                inc.data.location = location;
+
+                to_write.push(ord_history.to_db_row());
+                to_write.push(inc.data.to_db_row()?);
+            }
+
+            self.store
+                .inscription_db()
+                .write(to_write, crate::new_index::db::DBFlush::Disable);
+            self.store
+                .temp_db()
+                .write(to_temp_write, crate::new_index::db::DBFlush::Disable);
 
             token_cache.load_tokens_data(&self.store.token_db);
 
@@ -1175,7 +1247,6 @@ impl ChainQuery {
                     content_length: extra.content_length,
                     content_type: extra.content_type,
                     offset: location.offset,
-                    value: extra.value,
                 }),
             });
         }

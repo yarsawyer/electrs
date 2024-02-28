@@ -25,7 +25,7 @@ use crate::util::fees::{make_fee_histogram, TxFeeInfo};
 use crate::util::{extract_tx_prevouts, full_hash, has_prevout, is_spendable, Bytes};
 use crate::{errors::*, Inscription};
 
-use super::inscriptions_updater::load_partials;
+use super::temp_updater::load_partials;
 
 pub struct Mempool {
     chain: Arc<ChainQuery>,

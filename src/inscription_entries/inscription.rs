@@ -1,17 +1,18 @@
-use std::convert::TryInto;
+use std::{collections::HashMap, convert::TryInto};
 
 use anyhow::Ok;
 use bitcoin::{
-    hashes::{hex::FromHex, Hash},
-    BlockHash, OutPoint, Txid,
+    hashes::{hex::FromHex, sha256t::Tag, Hash},
+    BlockHash, OutPoint, TxOut, Txid,
 };
 use itertools::Itertools;
+use postcard::fixint::le;
 
 use crate::{
     inscription_entries::index::PARTIAL_TXID_TO_TXIDS,
     media::Media,
     new_index::{DBRow, Store},
-    util::{bincode_util, errors::AsAnyhow, Bytes},
+    util::{bincode_util, errors::AsAnyhow, Bytes, ScriptToAddr},
 };
 
 use super::{
@@ -123,9 +124,9 @@ impl OrdHistoryRow {
         bincode_util::serialize_big(&(OrdHistoryRow::CODE, &address, height)).unwrap()
     }
 
-    pub fn create_db_key(address: String, location: &Location) -> Vec<u8> {
+    pub fn create_db_key(address: &str, location: &Location) -> Vec<u8> {
         OrdHistoryKey {
-            owner: address,
+            owner: address.to_string(),
             location: location.clone(),
         }
         .to_raw()
@@ -134,14 +135,14 @@ impl OrdHistoryRow {
 
     pub fn to_db_row(self) -> DBRow {
         DBRow {
-            key: Self::create_db_key(self.key.owner, &self.key.location),
+            key: Self::create_db_key(&self.key.owner, &self.key.location),
             value: self.value.get_raw(),
         }
     }
 
     pub fn to_temp_db_row(self, block_height: u32) -> DBRow {
         DBRow {
-            key: Self::get_temp_db_key(self.key.owner, &self.key.location, block_height),
+            key: Self::get_temp_db_key(&self.key.owner, &self.key.location, block_height),
             value: self.value.get_raw(),
         }
     }
@@ -171,7 +172,7 @@ impl OrdHistoryRow {
         self.value.inscription_number
     }
 
-    pub fn get_temp_db_key(address: String, location: &Location, block_height: u32) -> Vec<u8> {
+    pub fn get_temp_db_key(address: &str, location: &Location, block_height: u32) -> Vec<u8> {
         [
             Self::create_db_key(address, location),
             block_height.to_be_bytes().to_vec(),
@@ -941,5 +942,179 @@ impl Location {
             self.outpoint.vout,
             self.offset
         )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MovedInscription {
+    pub data: InscriptionExtraData,
+    pub new_owner: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct LeakedInscription {
+    pub data: InscriptionExtraData,
+    pub total_tx_fee: u64,
+    pub fee_offset: u64,
+}
+
+impl LeakedInscription {
+    pub fn new(data: InscriptionExtraData, total_tx_fee: u64, fee_offset: u64) -> Self {
+        Self {
+            data,
+            total_tx_fee,
+            fee_offset,
+        }
+    }
+}
+
+pub struct LeakedInscriptions {
+    inscriptions: HashMap<u64, Vec<LeakedInscription>>,
+    total_amount: u64,
+    coinbase_tx: Transaction,
+    coinbase_reward: Option<u64>,
+}
+
+impl LeakedInscriptions {
+    pub fn new(coinbase_tx: Transaction) -> Self {
+        Self {
+            coinbase_tx,
+            inscriptions: HashMap::new(),
+            total_amount: 0,
+            coinbase_reward: None,
+        }
+    }
+
+    pub fn add(
+        &mut self,
+        input_idx: usize,
+        tx: &Transaction,
+        input_offset: u64,
+        tx_outs: &HashMap<OutPoint, TxOut>,
+        inscription: InscriptionExtraData,
+        skip_total_tx_fee: bool,
+    ) {
+        let (mut total_tx_fee, fee_offset) = Self::find_fee(tx, input_idx, input_offset, tx_outs);
+
+        if skip_total_tx_fee {
+            total_tx_fee = 0;
+        }
+
+        let new_item = LeakedInscription::new(inscription, total_tx_fee, fee_offset);
+
+        self.inscriptions
+            .entry(self.total_amount)
+            .and_modify(|x| {
+                x.push(new_item.clone());
+            })
+            .or_insert(vec![new_item]);
+    }
+
+    pub fn add_tx_fee(&mut self, tx: &Transaction, txos: &HashMap<OutPoint, TxOut>) {
+        let inputs_sum = tx
+            .input
+            .iter()
+            .map(|x| txos.get(&x.previous_output).unwrap().value)
+            .sum::<u64>();
+
+        let outputs_sum = tx.output.iter().map(|x| x.value).sum::<u64>();
+
+        self.total_amount += inputs_sum - outputs_sum;
+    }
+
+    fn update_reward(&mut self) {
+        self.coinbase_reward =
+            Some(self.coinbase_tx.output.iter().map(|x| x.value).sum::<u64>() - self.total_amount);
+    }
+
+    pub fn get_leaked_inscriptions<'a>(
+        &'a mut self,
+    ) -> impl Iterator<Item = (Location, MovedInscription)> + 'a {
+        self.update_reward();
+
+        self.inscriptions
+            .clone()
+            .into_iter()
+            .flat_map(|(offset, x)| x.into_iter().map(move |x| (offset, x)))
+            .filter_map(move |(offset, mut x)| {
+                self.find_inscription_vout(offset, x.fee_offset)
+                    .map(|(vout, offset)| {
+                        let location = Location {
+                            offset,
+                            outpoint: OutPoint {
+                                txid: self.coinbase_tx.txid(),
+                                vout,
+                            },
+                        };
+
+                        x.data.value.value = self.coinbase_tx.output[vout as usize].value;
+
+                        (
+                            location,
+                            MovedInscription {
+                                data: x.data,
+                                new_owner: Some(
+                                    self.coinbase_tx.output[vout as usize]
+                                        .script_pubkey
+                                        .to_address_str(crate::chain::Network::Bellscoin)
+                                        .expect("Cannot get address for coinbase output"),
+                                ),
+                            },
+                        )
+                    })
+            })
+    }
+
+    fn find_inscription_vout(&self, offset: u64, fee_offset: u64) -> Option<(u32, u64)> {
+        let inc_offset = offset
+            - self
+                .inscriptions
+                .get(&offset)
+                .unwrap()
+                .first()
+                .unwrap()
+                .total_tx_fee
+            + fee_offset;
+        let mut offset = inc_offset + self.coinbase_reward.unwrap();
+
+        for (i, tx) in self.coinbase_tx.output.iter().enumerate() {
+            if offset < tx.value {
+                return Some((i as u32, offset));
+            }
+            offset -= tx.value;
+        }
+        None
+    }
+
+    fn find_fee(
+        tx: &Transaction,
+        input_idx: usize,
+        input_offset: u64,
+        tx_outs: &HashMap<OutPoint, TxOut>,
+    ) -> (u64, u64) {
+        let inputs_cum = {
+            let mut last_value = 0;
+
+            tx.input
+                .iter()
+                .map(|x| {
+                    last_value += tx_outs.get(&x.previous_output).unwrap().value;
+                    last_value
+                })
+                .collect_vec()
+        };
+
+        let output_sum = tx.output.iter().map(|x| x.value).sum::<u64>();
+        let input_sum = *inputs_cum.last().unwrap();
+
+        let offset = inputs_cum.get(input_idx).unwrap()
+            - tx_outs
+                .get(&tx.input.get(input_idx).unwrap().previous_output)
+                .map(|x| x.value)
+                .unwrap()
+            + input_offset
+            - output_sum;
+
+        (input_sum - output_sum, offset)
     }
 }

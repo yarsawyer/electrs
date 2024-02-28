@@ -1,4 +1,4 @@
-use std::{collections::HashMap, convert::TryInto, str::FromStr, sync::Arc};
+use std::{collections::HashMap, convert::TryInto, sync::Arc};
 
 use crate::{
     config::TOKENS_OFFSET,
@@ -6,12 +6,12 @@ use crate::{
         index::PARTIAL_TXID_TO_TXIDS,
         inscription::{
             update_last_block_number, Inscription, InscriptionContent, InscriptionExtraData,
-            LastInscriptionNumber, Location, OrdHistoryKey, OrdHistoryRow, OrdHistoryValue,
-            ParsedInscription, PartialTxs, UserOrdStats,
+            LastInscriptionNumber, LeakedInscriptions, Location, MovedInscription, OrdHistoryRow,
+            OrdHistoryValue, ParsedInscription, PartialTxs, UserOrdStats,
         },
         InscriptionId,
     },
-    new_index::{schema::TxOutRow, token::TransferProto},
+    new_index::schema::TxOutRow,
     util::{bincode_util, errors::AsAnyhow, full_hash, HeaderEntry, ScriptToAddr},
     HEIGHT_DELAY,
 };
@@ -19,11 +19,7 @@ use anyhow::{Ok, Result};
 use bitcoin::{consensus::Decodable, hashes::Hash, BlockHash, OutPoint, TxOut};
 use bitcoin::{Transaction, Txid};
 use itertools::Itertools;
-use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
-};
-use std::collections::BTreeMap;
-use std::ops::Bound::Included;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 use super::{
     schema::{BlockRow, TxRow},
@@ -47,13 +43,14 @@ impl InscriptionUpdater {
         txos: &HashMap<OutPoint, TxOut>,
         token_cache: &mut TokenCache,
         sender: Arc<crossbeam_channel::Sender<InscriptionContent>>,
+        leaked_inscriptions: &mut LeakedInscriptions,
     ) -> Result<()> {
         let txid = tx.txid();
 
         let mut to_temp_write = vec![];
         let mut to_write = vec![];
 
-        let mut stats_cache = HashMap::new();
+        let mut is_inscription_found = false;
 
         for (idx, input) in tx.input.iter().enumerate() {
             for (key, mut inscription_extra) in self
@@ -86,9 +83,30 @@ impl InscriptionUpdater {
 
                 let inputs_cum = InscriptionSearcher::calc_offsets(&tx, &txos).unwrap();
 
+                let Result::Ok((vout, offset)) = InscriptionSearcher::get_output_index_by_input(
+                    inputs_cum
+                        .get(idx)
+                        .copied()
+                        .map(|x| x + inscription_extra.location.offset),
+                    &tx.output,
+                ) else {
+                    leaked_inscriptions.add(
+                        idx,
+                        &tx,
+                        inscription_extra.location.offset,
+                        txos,
+                        inscription_extra,
+                        is_inscription_found,
+                    );
+
+                    is_inscription_found = true;
+
+                    continue;
+                };
+
                 // Work with old user
                 let prev_history_value = {
-                    let key = OrdHistoryRow::create_db_key(old_owner.clone(), &prev_location);
+                    let key = OrdHistoryRow::create_db_key(&old_owner, &prev_location);
 
                     let prev_history_value = self
                         .store
@@ -99,7 +117,7 @@ impl InscriptionUpdater {
 
                     to_temp_write.push(
                         OrdHistoryRow::new(
-                            old_owner,
+                            old_owner.clone(),
                             prev_location.clone(),
                             prev_history_value.clone(),
                         )
@@ -107,30 +125,6 @@ impl InscriptionUpdater {
                     );
 
                     prev_history_value
-                };
-
-                let Result::Ok((vout, offset)) = InscriptionSearcher::get_output_index_by_input(
-                    inputs_cum
-                        .get(idx)
-                        .copied()
-                        .map(|x| x + inscription_extra.location.offset),
-                    &tx.output,
-                ) else {
-                    inscription_extra.value.owner = "leaked 😭".to_owned();
-
-                    token_cache.try_transfer(
-                        block_height,
-                        tx_idx,
-                        prev_location.outpoint,
-                        "leaked".to_string(),
-                    );
-
-                    self.store.inscription_db().write(
-                        vec![inscription_extra.to_db_row()?],
-                        crate::new_index::db::DBFlush::Disable,
-                    );
-
-                    continue;
                 };
 
                 let new_outpoint = Location {
@@ -147,20 +141,16 @@ impl InscriptionUpdater {
 
                     inscription_extra.value.owner = new_owner.clone();
 
-                    if !stats_cache.contains_key(&new_owner) {
-                        if let Some(v) = self
-                            .store
-                            .inscription_db()
-                            .get(&UserOrdStats::get_db_key(&new_owner).unwrap())
-                            .map(|x| UserOrdStats::from_raw(&x).unwrap())
-                        {
-                            stats_cache.insert(new_owner.clone(), v);
-                        }
-                    }
+                    if let Some(mut v) = self
+                        .store
+                        .inscription_db()
+                        .get(&UserOrdStats::get_db_key(&new_owner).unwrap())
+                        .map(|x| UserOrdStats::from_raw(&x).unwrap())
+                    {
+                        v.amount += inscription_extra.value.value;
+                        v.count += 1;
 
-                    if let Some(stats_cache) = stats_cache.get_mut(&new_owner) {
-                        stats_cache.amount += inscription_extra.value.value;
-                        stats_cache.count += 1;
+                        to_write.push(v.to_db_row(&old_owner).unwrap());
                     }
 
                     token_cache.try_transfer(
@@ -179,6 +169,8 @@ impl InscriptionUpdater {
                 to_write.push(inscription_extra.to_db_row()?);
             }
         }
+
+        leaked_inscriptions.add_tx_fee(&tx, txos);
 
         if !to_temp_write.is_empty() || !to_write.is_empty() {
             self.store
@@ -507,7 +499,7 @@ impl InscriptionUpdater {
                         // History data to restore
                         {
                             let history_key = OrdHistoryRow::get_temp_db_key(
-                                extra.value.owner,
+                                &extra.value.owner,
                                 &extra.location,
                                 block_height,
                             );
@@ -568,7 +560,7 @@ impl InscriptionUpdater {
 
                             self.store.inscription_db().delete_batch(vec![
                                 extra.to_db_row().unwrap().key,
-                                OrdHistoryRow::create_db_key(owner.clone(), &extra.location),
+                                OrdHistoryRow::create_db_key(&owner, &extra.location),
                             ]);
                         }
                     }
@@ -655,562 +647,6 @@ impl InscriptionUpdater {
     }
 }
 
-pub struct IndexHandler<'a> {
-    pub store: &'a Store,
-    pub cached_partial: HashMap<OutPoint, Vec<(u32, usize, Transaction)>>,
-    pub inscription_number: u64,
-}
-impl<'a> IndexHandler<'a> {
-    pub fn try_parse_inscription(h: u32, txs: &[Transaction]) -> DigestedBlock {
-        let mut partials: HashMap<OutPoint, Vec<(u32, usize, Transaction)>> = HashMap::new();
-        let mut inscriptions = vec![];
-        let mut rest = vec![];
-        let mut token_cache = TokenCache::default();
-
-        for (i, tx) in txs.into_iter().enumerate() {
-            if !Self::parse_inscriptions(
-                tx,
-                h,
-                i,
-                &mut partials,
-                &mut inscriptions,
-                &mut token_cache,
-            ) {
-                rest.push((h, i, tx.clone()));
-            }
-        }
-
-        DigestedBlock {
-            height: h,
-            partial_inscription: partials,
-            completed_inscription: inscriptions,
-            rest,
-            token_cache,
-        }
-    }
-
-    pub fn handle_blocks(
-        &mut self,
-        blocks: &Vec<(u32, Vec<Transaction>)>,
-        token_cache: &mut TokenCache,
-    ) -> Vec<InscriptionTemplate> {
-        let mut data = vec![];
-        blocks
-            .into_par_iter()
-            .map(|(h, txs)| Self::try_parse_inscription(*h, txs))
-            .collect_into_vec(&mut data);
-        data.sort_unstable_by_key(|x| x.height);
-
-        let mut completed = vec![];
-
-        for mut digested_block in data {
-            self.cached_partial
-                .extend(digested_block.partial_inscription);
-            token_cache.extend(digested_block.token_cache);
-
-            for (height, index, tx) in digested_block.rest {
-                Self::parse_inscriptions(
-                    &tx,
-                    height,
-                    index,
-                    &mut self.cached_partial,
-                    &mut digested_block.completed_inscription,
-                    token_cache,
-                );
-            }
-
-            digested_block
-                .completed_inscription
-                .sort_unstable_by_key(|x| (x.1.height, x.0));
-
-            for (_, mut inc) in digested_block.completed_inscription {
-                inc.inscription_number = self.inscription_number;
-
-                self.inscription_number += 1;
-                completed.push(inc);
-            }
-        }
-
-        completed
-    }
-
-    fn parse_inscriptions(
-        tx: &Transaction,
-        height: u32,
-        idx: usize,
-        cache: &mut HashMap<OutPoint, Vec<(u32, usize, Transaction)>>,
-        inscriptions: &mut Vec<(usize, InscriptionTemplate)>,
-        token_cache: &mut TokenCache,
-    ) -> bool {
-        let mut chain = cache
-            .remove(&tx.input[0].previous_output)
-            .unwrap_or_default();
-
-        chain.push((height, idx, tx.clone()));
-
-        match Inscription::from_transactions(&chain.iter().map(|x| &x.2).collect_vec()) {
-            ParsedInscription::None => false,
-            ParsedInscription::Partial => {
-                cache.insert(
-                    OutPoint {
-                        txid: tx.txid(),
-                        vout: 0,
-                    },
-                    chain,
-                );
-                true
-            }
-            ParsedInscription::Complete(inscription) => {
-                let outpoint = OutPoint {
-                    txid: tx.txid(),
-                    vout: 0,
-                };
-                let genesis = OutPoint {
-                    txid: chain.first().unwrap().2.txid(),
-                    vout: 0,
-                };
-                let content_type = inscription.content_type().unwrap().to_owned();
-                let content_len = inscription.content_length().unwrap();
-                let content = inscription.into_body().unwrap();
-                let owner = get_owner(tx, 0).unwrap();
-
-                token_cache.parse_token_action(
-                    &content_type,
-                    &content,
-                    height,
-                    idx,
-                    owner.clone(),
-                    genesis,
-                    outpoint,
-                    None,
-                );
-
-                let inscription_template = InscriptionTemplate {
-                    genesis,
-                    location: Location {
-                        offset: 0,
-                        outpoint,
-                    },
-                    content_type,
-                    content_len,
-                    content,
-                    owner,
-                    inscription_number: 0,
-                    height,
-                    value: tx.output[0].value,
-                };
-                inscriptions.push((idx, inscription_template));
-
-                true
-            }
-        }
-    }
-
-    pub fn write_inscription(&self, data: &Vec<InscriptionTemplate>) -> anyhow::Result<()> {
-        let mut to_write = vec![];
-
-        let mut stats_cache: HashMap<_, _> = self
-            .store
-            .inscription_db()
-            .db
-            .multi_get(
-                data.iter()
-                    .map(|x| UserOrdStats::get_db_key(&x.owner).unwrap()),
-            )
-            .into_iter()
-            .flatten()
-            .map(|x| x.map(|x| UserOrdStats::from_raw(&x).unwrap()))
-            .zip(data.iter())
-            .map(|x| {
-                let owner = x.1.owner.clone();
-
-                x.0.map(|z| (owner, z))
-            })
-            .flatten()
-            .collect();
-
-        for inc in data {
-            let genesis = inc.genesis;
-            let location = inc.location.clone();
-
-            let new_row = OrdHistoryRow::new(
-                inc.owner.clone(),
-                location.clone(),
-                OrdHistoryValue {
-                    inscription_id: InscriptionId {
-                        txid: genesis.txid,
-                        index: genesis.vout,
-                    },
-                    inscription_number: inc.inscription_number,
-                },
-            );
-
-            let inscription_extra = InscriptionExtraData::new(
-                location,
-                inc.owner.clone(),
-                inc.height,
-                inc.content_type.clone(),
-                inc.content_len,
-                inc.value,
-            );
-
-            if let Some(v) = stats_cache.get_mut(&inc.owner) {
-                v.amount += inc.value;
-                v.count += 1;
-            }
-
-            to_write.push(new_row.to_db_row());
-            to_write.push(inscription_extra.to_db_row()?);
-        }
-
-        to_write.extend(
-            stats_cache
-                .into_iter()
-                .map(|(k, v)| v.to_db_row(&k).unwrap()),
-        );
-
-        self.store
-            .inscription_db()
-            .write(to_write, super::db::DBFlush::Enable);
-
-        Ok(())
-    }
-
-    pub fn write_partials(&mut self) -> anyhow::Result<()> {
-        if !self.cached_partial.is_empty() {
-            let to_write = self
-                .cached_partial
-                .iter()
-                .map(|(last_outpoint, txs)| {
-                    PartialTxs {
-                        block_height: txs[0].0,
-                        last_outpoint: *last_outpoint,
-                        txs: txs.iter().map(|x| x.2.txid()).collect_vec(),
-                    }
-                    .to_db()
-                    .anyhow_as("Failed to serialize partials")
-                })
-                .try_collect()?;
-
-            self.cached_partial.clear();
-            self.store
-                .inscription_db()
-                .write(to_write, super::db::DBFlush::Disable);
-        }
-
-        Ok(())
-    }
-
-    pub fn load_blocks_chunks(&self, blocks: Vec<BlockHash>) -> Vec<(u32, Vec<Transaction>)> {
-        let mut chunked = Vec::new();
-        blocks
-            .into_par_iter()
-            .map(|hash| {
-                let block_height = self.store.get_block_height(hash).unwrap() as u32;
-                let txs = self.get_multi_txs(&hash).unwrap().collect_vec();
-
-                (block_height, txs)
-            })
-            .collect_into_vec(&mut chunked);
-
-        chunked.sort_unstable_by_key(|x| x.0);
-        chunked
-    }
-
-    pub fn write_inscription_number(&self) -> anyhow::Result<()> {
-        let last_number = LastInscriptionNumber::new(self.inscription_number);
-
-        self.store
-            .inscription_db()
-            .write(vec![last_number.to_db()?], super::db::DBFlush::Disable);
-
-        Ok(())
-    }
-
-    pub fn get_multi_txs(
-        &self,
-        hash: &BlockHash,
-    ) -> anyhow::Result<impl Iterator<Item = Transaction>> {
-        let txids = self
-            .store
-            .txstore_db()
-            .get(&BlockRow::txids_key(full_hash(&hash[..])))
-            .map(|val| {
-                bincode_util::deserialize_little::<Vec<Txid>>(&val)
-                    .expect("failed to parse block txids")
-            })
-            .anyhow()?
-            .into_iter()
-            .map(|x| TxRow::key(&x[..]));
-
-        Ok(self
-            .store
-            .txstore_db()
-            .db
-            .multi_get(txids)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|x| {
-                bitcoin::Transaction::consensus_decode(std::io::Cursor::new(&x))
-                    .expect("failed to parse Transaction")
-            }))
-    }
-}
-
-pub struct MoveIndexer<'a> {
-    pub store: &'a Store,
-    pub cached_transfer: HashMap<OutPoint, (String, TransferProto)>,
-}
-impl<'a> MoveIndexer<'a> {
-    pub fn load_inscription(&self, txs: &[Transaction]) -> Vec<(Location, MovedInscription)> {
-        txs.into_par_iter()
-            .flat_map_iter(|x| {
-                x.input.iter().map(|x| x.previous_output).flat_map(|x| {
-                    self.store
-                        .inscription_db()
-                        .iter_scan(&InscriptionExtraData::find_by_outpoint(&x))
-                        .map(|x| InscriptionExtraData::from_raw(x).unwrap())
-                        .map(|x| {
-                            (
-                                x.location.clone(),
-                                MovedInscription {
-                                    data: x,
-                                    leaked: false,
-                                    new_owner: None,
-                                },
-                            )
-                        })
-                })
-            })
-            .collect()
-    }
-
-    pub fn handle(
-        &mut self,
-        blocks: &Vec<(u32, Vec<Transaction>)>,
-        token_cache: &mut TokenCache,
-    ) -> HashMap<Location, MovedInscription> {
-        let mut temp = vec![];
-
-        use crate::measure_time;
-
-        measure_time!("loading blocks for handle moves": blocks
-            .par_iter()
-            .map(|(_, txs)| {
-                (
-                    load_txos(self.store.txstore_db(), txs),
-                    self.load_inscription(txs),
-                )
-            })
-            .collect_into_vec(&mut temp));
-
-        let mut txos = HashMap::new();
-        let mut inscriptions: BTreeMap<Location, MovedInscription> = BTreeMap::new();
-
-        for (tx_outs, inc) in temp {
-            txos.extend(tx_outs.into_iter().map(|x| (x.0, x.1)));
-            for (loc, inc) in inc {
-                inscriptions.insert(loc, inc);
-            }
-        }
-
-        if inscriptions.is_empty() {
-            return HashMap::default();
-        }
-
-        for (height, txs) in blocks {
-            for tx in txs {
-                // todo coinbase be back
-                if tx.is_coin_base() {
-                    continue;
-                }
-
-                let found_inscriptions = tx
-                    .input
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(idx, x)| {
-                        let keys = inscriptions
-                            .range((
-                                Included(Location {
-                                    outpoint: x.previous_output,
-                                    offset: 0,
-                                }),
-                                Included(Location {
-                                    outpoint: x.previous_output,
-                                    offset: u64::MAX,
-                                }),
-                            ))
-                            .map(|x| x.0)
-                            .cloned()
-                            .collect_vec();
-
-                        let mut res = vec![];
-
-                        for location in keys {
-                            res.push((
-                                idx,
-                                location.offset,
-                                inscriptions.remove(&location).unwrap(),
-                            ))
-                        }
-
-                        res.into_iter()
-                    })
-                    .collect_vec();
-
-                if found_inscriptions.is_empty() {
-                    continue;
-                }
-
-                let inputs_cum = InscriptionSearcher::calc_offsets(tx, &txos).unwrap();
-
-                for (idx, current_offset, mut inc) in found_inscriptions {
-                    let Result::Ok((vout, offset)) = InscriptionSearcher::get_output_index_by_input(
-                        inputs_cum.get(idx).copied().map(|x| x + current_offset),
-                        &tx.output,
-                    ) else {
-                        if inc.new_owner.is_none() {
-                            token_cache.try_transfer(
-                                *height,
-                                idx,
-                                inc.data.location.outpoint,
-                                "leaked".to_owned(),
-                            );
-                        }
-
-                        inc.leaked = true;
-                        inscriptions.insert(inc.data.location.clone(), inc);
-
-                        continue;
-                    };
-
-                    inc.data.value.value = tx.output[vout as usize].value;
-                    let location = Location {
-                        offset,
-                        outpoint: OutPoint {
-                            txid: tx.txid(),
-                            vout,
-                        },
-                    };
-
-                    let new_owner = get_owner(tx, vout as usize).unwrap();
-                    if inc.new_owner.is_none() {
-                        token_cache.try_transfer(
-                            *height,
-                            idx,
-                            inc.data.location.outpoint,
-                            new_owner.clone(),
-                        );
-                    }
-
-                    inc.new_owner = Some(new_owner);
-                    inscriptions.insert(location, inc);
-                }
-            }
-        }
-
-        inscriptions.into_iter().collect()
-    }
-
-    pub fn write_moves(&self, data: HashMap<Location, MovedInscription>) -> anyhow::Result<()> {
-        let mut to_write = vec![];
-
-        let keys = {
-            let mut keys = data.values().map(|x| &x.data.value.owner).collect_vec();
-            keys.extend(data.values().map(|x| &x.new_owner).flatten());
-
-            keys.into_iter().unique().collect_vec()
-        };
-
-        let mut stats_cache: HashMap<_, _> = self
-            .store
-            .inscription_db()
-            .db
-            .multi_get(keys.iter().map(|x| UserOrdStats::get_db_key(&x).unwrap()))
-            .into_iter()
-            .flatten()
-            .map(|x| x.map(|x| UserOrdStats::from_raw(&x).unwrap()))
-            .zip(keys)
-            .map(|x| {
-                let owner = x.1.clone();
-
-                x.0.map(|z| (owner, z))
-            })
-            .flatten()
-            .collect();
-
-        for (new_location, mut inc) in data {
-            if !inc.leaked && inc.new_owner.is_none() {
-                continue;
-            }
-
-            let old_location = inc.data.location.clone();
-            let key = InscriptionExtraData::get_db_key(old_location.clone());
-
-            let old_owner = inc.data.value.owner.clone();
-
-            if let Some(v) = stats_cache.get_mut(&old_owner) {
-                v.amount -= inc.data.value.value;
-                v.count -= 1;
-            }
-
-            inc.data.location = new_location.clone();
-            if inc.leaked {
-                inc.data.value.owner = "leaked 😭".to_owned();
-            }
-
-            let prev_history_value = {
-                self.store.inscription_db().db.delete(&key)?;
-                self.store
-                    .inscription_db()
-                    .remove(&OrdHistoryRow::create_db_key(
-                        old_owner.clone(),
-                        &old_location,
-                    ))
-                    .map(|x| OrdHistoryRow::value_from_raw(&x))
-                    .anyhow_as("Failed to find OrdHistoryRow")?
-            };
-
-            if let Some(new_owner) = inc.new_owner {
-                if let Some(v) = stats_cache.get_mut(&new_owner) {
-                    v.amount += inc.data.value.value;
-                    v.count += 1;
-                }
-
-                inc.data.value.owner = new_owner.clone();
-
-                let new_ord_history =
-                    OrdHistoryRow::new(new_owner, new_location, prev_history_value);
-
-                to_write.push(new_ord_history.to_db_row());
-            }
-
-            to_write.push(inc.data.to_db_row()?);
-        }
-
-        to_write.extend(
-            stats_cache
-                .into_iter()
-                .map(|x| x.1.to_db_row(&x.0).unwrap()),
-        );
-
-        self.store
-            .inscription_db()
-            .write(to_write, super::db::DBFlush::Enable);
-
-        Ok(())
-    }
-}
-
-pub struct DigestedBlock {
-    pub height: u32,
-    pub partial_inscription: HashMap<OutPoint, Vec<(u32, usize, Transaction)>>,
-    pub completed_inscription: Vec<(usize, InscriptionTemplate)>,
-    pub rest: Vec<(u32, usize, Transaction)>,
-    pub token_cache: TokenCache,
-}
 #[derive(Default)]
 pub struct DigestedMoves {
     pub inscriptions: HashMap<OutPoint, MovedInscription>,
@@ -1228,17 +664,10 @@ pub struct InscriptionTemplate {
     pub content: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
-pub struct MovedInscription {
-    pub data: InscriptionExtraData,
-    pub new_owner: Option<String>,
-    pub leaked: bool,
-}
-
-struct InscriptionSearcher {}
+pub struct InscriptionSearcher {}
 
 impl InscriptionSearcher {
-    fn calc_offsets(tx: &Transaction, tx_outs: &HashMap<OutPoint, TxOut>) -> Option<Vec<u64>> {
+    pub fn calc_offsets(tx: &Transaction, tx_outs: &HashMap<OutPoint, TxOut>) -> Option<Vec<u64>> {
         let mut input_values = tx
             .input
             .iter()
@@ -1266,7 +695,7 @@ impl InscriptionSearcher {
         Some(inputs_offsets)
     }
 
-    fn get_output_index_by_input(
+    pub fn get_output_index_by_input(
         offset: Option<u64>,
         tx_outs: &[TxOut],
     ) -> anyhow::Result<(u32, u64)> {

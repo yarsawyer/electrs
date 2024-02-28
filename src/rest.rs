@@ -307,7 +307,6 @@ pub struct InscriptionMeta {
     pub content_length: usize,
     pub inscription_id: InscriptionId,
     pub inscription_number: u64,
-    pub value: u64,
     pub offset: u64,
 }
 
