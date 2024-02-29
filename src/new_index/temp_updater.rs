@@ -16,10 +16,9 @@ use crate::{
     HEIGHT_DELAY,
 };
 use anyhow::{Ok, Result};
-use bitcoin::{consensus::Decodable, hashes::Hash, BlockHash, OutPoint, TxOut};
+use bitcoin::{consensus::Decodable, hashes::Hash, OutPoint, TxOut};
 use bitcoin::{Transaction, Txid};
 use itertools::Itertools;
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 use super::{
     schema::{BlockRow, TxRow},
@@ -51,6 +50,8 @@ impl InscriptionUpdater {
         let mut to_write = vec![];
 
         let mut is_inscription_found = false;
+
+        leaked_inscriptions.add_tx_fee(&tx, txos);
 
         for (idx, input) in tx.input.iter().enumerate() {
             for (key, mut inscription_extra) in self
@@ -169,8 +170,6 @@ impl InscriptionUpdater {
                 to_write.push(inscription_extra.to_db_row()?);
             }
         }
-
-        leaked_inscriptions.add_tx_fee(&tx, txos);
 
         if !to_temp_write.is_empty() || !to_write.is_empty() {
             self.store

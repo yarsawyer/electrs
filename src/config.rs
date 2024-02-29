@@ -290,7 +290,7 @@ impl Config {
 
         let first_inscription_block: usize = m
             .value_of("first_inscription_block")
-            .unwrap_or("0")
+            .unwrap_or("22470")
             .parse()
             .unwrap();
 

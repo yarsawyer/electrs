@@ -55,9 +55,7 @@ impl<'a> MoveIndexer<'a> {
     ) -> HashMap<Location, MovedInscription> {
         let mut temp = vec![];
 
-        use crate::measure_time;
-
-        measure_time!("loading blocks for handle moves": blocks
+        blocks
             .par_iter()
             .map(|(_, txs)| {
                 (
@@ -65,7 +63,7 @@ impl<'a> MoveIndexer<'a> {
                     self.load_inscription(txs),
                 )
             })
-            .collect_into_vec(&mut temp));
+            .collect_into_vec(&mut temp);
 
         let mut txos = HashMap::new();
         let mut inscriptions: BTreeMap<Location, MovedInscription> = BTreeMap::new();
@@ -85,11 +83,12 @@ impl<'a> MoveIndexer<'a> {
             let mut leaked_inscriptions = None;
 
             for tx in txs {
-                // todo coinbase be back
                 if tx.is_coin_base() {
                     leaked_inscriptions = Some(LeakedInscriptions::new(tx.clone()));
                     continue;
                 }
+
+                leaked_inscriptions.as_mut().unwrap().add_tx_fee(tx, &txos);
 
                 let found_inscriptions = tx
                     .input
@@ -137,6 +136,10 @@ impl<'a> MoveIndexer<'a> {
                                 &tx.output,
                             )
                         else {
+                            if inc.data.value.content_length > 1000 {
+                                dbg!(&inc.data.location);
+                            }
+
                             leaked_inscriptions.as_mut().unwrap().add(
                                 idx,
                                 tx,
@@ -173,8 +176,6 @@ impl<'a> MoveIndexer<'a> {
                         inscriptions.insert(location, inc);
                     }
                 }
-
-                leaked_inscriptions.as_mut().unwrap().add_tx_fee(tx, &txos);
             }
 
             let Some(leaked_inscriptions) = leaked_inscriptions.as_mut() else {

@@ -1,16 +1,17 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
 use crate::errors;
-use crate::inscription_entries::inscription::{InscriptionExtraData, Location};
+use crate::inscription_entries::index::OUTPOINT_IS_INSCRIPTION;
+use crate::inscription_entries::inscription::{InscriptionExtraData, Location, OrdHistoryRow};
 use crate::inscription_entries::InscriptionId;
 use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::schema::OrdsSearcher;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
 use crate::util::errors::UnwrapPrint;
 use crate::util::{
-    create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
-    has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
-    ScriptToAddr, ScriptToAsm, TransactionStatus,
+    bincode_util, create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts,
+    get_tx_fee, has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId,
+    FullHash, ScriptToAddr, ScriptToAsm, TransactionStatus,
 };
 
 use {bitcoin::consensus::encode, std::str::FromStr};
@@ -1295,7 +1296,32 @@ fn handle_request(
                 http_message(StatusCode::BAD_REQUEST, "Invalid outpoint", TTL_SHORT)
             }
         }
+        // (&Method::GET, Some(&"search-inc"), Some(v), None, None, None) => {
+        //     let outpoint = InscriptionId::from_str(*v);
+        //     if let Ok(outpoint) = outpoint {
+        //         let outpoint = OutPoint {
+        //             txid: outpoint.txid,
+        //             vout: outpoint.index,
+        //         };
 
+        //         let ord = query
+        //             .chain()
+        //             .store()
+        //             .inscription_db()
+        //             .iter_scan(&bincode_util::serialize_big(&(OrdHistoryRow::CODE)).unwrap())
+        //             .map(OrdHistoryRow::from_row)
+        //             .find(|x| x.value.inscription_id.to_string().starts_with(*v));
+
+        //         json_response(
+        //             json!({
+        //                 "ords": ord
+        //             }),
+        //             TTL_SHORT,
+        //         )
+        //     } else {
+        //         http_message(StatusCode::BAD_REQUEST, "Invalid outpoint", TTL_SHORT)
+        //     }
+        // }
         _ => Err(HttpError::not_found(format!(
             "endpoint does not exist {:?}",
             uri.path()
