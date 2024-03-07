@@ -1310,9 +1310,14 @@ fn handle_request(
                 data.locations
                     .iter()
                     .filter_map(|outpoint| {
-                        mempool
-                            .lookup_txn(&outpoint.txid)
-                            .map(|x| (x, outpoint.vout))
+                        {
+                            if let Some(tx) = query.lookup_txn(&outpoint.txid) {
+                                Some(tx)
+                            } else {
+                                mempool.lookup_txn(&outpoint.txid)
+                            }
+                        }
+                        .map(|x| (x, outpoint.vout))
                     })
                     .filter_map(|(tx, vout)| tx.output.get(vout as usize).map(|x| x.value))
                     .collect()
