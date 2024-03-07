@@ -116,6 +116,11 @@ fn difficulty_new(bh: &bitcoin::BlockHeader) -> f64 {
     d_diff
 }
 
+#[derive(Deserialize)]
+struct OutpointMap {
+    locations: Vec<OutPoint>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct TransactionValue {
     txid: Txid,
@@ -1296,32 +1301,31 @@ fn handle_request(
                 http_message(StatusCode::BAD_REQUEST, "Invalid outpoint", TTL_SHORT)
             }
         }
-        // (&Method::GET, Some(&"search-inc"), Some(v), None, None, None) => {
-        //     let outpoint = InscriptionId::from_str(*v);
-        //     if let Ok(outpoint) = outpoint {
-        //         let outpoint = OutPoint {
-        //             txid: outpoint.txid,
-        //             vout: outpoint.index,
-        //         };
+        (&Method::POST, Some(&"prev"), None, None, None, None) => {
+            let data: OutpointMap =
+                serde_json::from_slice(&body).map_err(|err| HttpError::from(err.to_string()))?;
 
-        //         let ord = query
-        //             .chain()
-        //             .store()
-        //             .inscription_db()
-        //             .iter_scan(&bincode_util::serialize_big(&(OrdHistoryRow::CODE)).unwrap())
-        //             .map(OrdHistoryRow::from_row)
-        //             .find(|x| x.value.inscription_id.to_string().starts_with(*v));
+            let vout_values: Vec<u64> = {
+                let mempool = query.mempool();
+                data.locations
+                    .iter()
+                    .filter_map(|outpoint| {
+                        mempool
+                            .lookup_txn(&outpoint.txid)
+                            .map(|x| (x, outpoint.vout))
+                    })
+                    .filter_map(|(tx, vout)| tx.output.get(vout as usize).map(|x| x.value))
+                    .collect()
+            };
 
-        //         json_response(
-        //             json!({
-        //                 "ords": ord
-        //             }),
-        //             TTL_SHORT,
-        //         )
-        //     } else {
-        //         http_message(StatusCode::BAD_REQUEST, "Invalid outpoint", TTL_SHORT)
-        //     }
-        // }
+            json_response(
+                json!({
+                    "values": vout_values
+                }),
+                0,
+            )
+        }
+
         _ => Err(HttpError::not_found(format!(
             "endpoint does not exist {:?}",
             uri.path()

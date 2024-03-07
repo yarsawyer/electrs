@@ -136,10 +136,6 @@ impl<'a> MoveIndexer<'a> {
                                 &tx.output,
                             )
                         else {
-                            if inc.data.value.content_length > 1000 {
-                                dbg!(&inc.data.location);
-                            }
-
                             leaked_inscriptions.as_mut().unwrap().add(
                                 idx,
                                 tx,

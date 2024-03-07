@@ -3,14 +3,9 @@ use std::{path::Path, str::FromStr};
 use bitcoin::{consensus::Decodable, hashes::Hash, OutPoint, Txid};
 use electrs::{
     config::Config,
-    inscription_entries::{
-        inscription::{InscriptionExtraData, PartialTxs},
-        ParsedInscription,
-    },
-    new_index::{schema::TxRow, DBRow, DB},
-    Inscription,
+    inscription_entries::inscription::PartialTxs,
+    new_index::{schema::TxRow, DB},
 };
-use itertools::Itertools;
 use tracing::{error, warn};
 
 fn main() -> anyhow::Result<()> {

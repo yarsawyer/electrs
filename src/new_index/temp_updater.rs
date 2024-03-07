@@ -786,8 +786,8 @@ macro_rules! measure_time {
     ($n:literal: $e:expr) => {{
         let time = std::time::Instant::now();
         let a = $e;
-        if time.elapsed().as_secs_f32() > 2.0 {
-            tracing::warn!("{}: {:.3} s", $n, time.elapsed().as_secs_f32());
+        if time.elapsed().as_secs_f32() > 5.0 {
+            tracing::debug!("{}: {:.3} s", $n, time.elapsed().as_secs_f32());
         }
         a
     }};

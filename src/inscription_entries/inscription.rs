@@ -2,11 +2,10 @@ use std::{collections::HashMap, convert::TryInto};
 
 use anyhow::Ok;
 use bitcoin::{
-    hashes::{hex::FromHex, sha256t::Tag, Hash},
+    hashes::{hex::FromHex, Hash},
     BlockHash, OutPoint, TxOut, Txid,
 };
 use itertools::Itertools;
-use postcard::fixint::le;
 
 use crate::{
     inscription_entries::index::PARTIAL_TXID_TO_TXIDS,

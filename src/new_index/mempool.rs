@@ -1,5 +1,3 @@
-use bitcoin::hashes::Hash;
-use bitcoin::BlockHash;
 use bounded_vec_deque::BoundedVecDeque;
 use itertools::Itertools;
 
