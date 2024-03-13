@@ -1,4 +1,8 @@
-use std::{collections::HashMap, convert::TryInto, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::TryInto,
+    sync::Arc,
+};
 
 use crate::{
     config::TOKENS_OFFSET,
@@ -54,6 +58,8 @@ impl InscriptionUpdater {
         leaked_inscriptions.add_tx_fee(&tx, txos);
 
         for (idx, input) in tx.input.iter().enumerate() {
+            let mut stats_incremented = HashSet::<OutPoint>::new();
+
             for (key, mut inscription_extra) in self
                 .store
                 .inscription_db()
@@ -68,16 +74,20 @@ impl InscriptionUpdater {
 
                 let old_owner = inscription_extra.value.owner.clone();
 
-                if let Some(mut v) = self
-                    .store
-                    .inscription_db()
-                    .get(&UserOrdStats::get_db_key(&old_owner).unwrap())
-                    .map(|x| UserOrdStats::from_raw(&x).unwrap())
-                {
-                    v.amount -= inscription_extra.value.value;
-                    v.count -= 1;
+                if !stats_incremented.contains(&prev_location.outpoint) {
+                    stats_incremented.insert(prev_location.outpoint);
 
-                    to_write.push(v.to_db_row(&old_owner).unwrap());
+                    if let Some(mut v) = self
+                        .store
+                        .inscription_db()
+                        .get(&UserOrdStats::get_db_key(&old_owner).unwrap())
+                        .map(|x| UserOrdStats::from_raw(&x).unwrap())
+                    {
+                        v.amount -= inscription_extra.value.value;
+                        v.count -= 1;
+
+                        to_write.push(v.to_db_row(&old_owner).unwrap());
+                    }
                 }
 
                 to_temp_write.push(inscription_extra.to_temp_db_row(block_height, &prev_location)?);
@@ -142,16 +152,20 @@ impl InscriptionUpdater {
 
                     inscription_extra.value.owner = new_owner.clone();
 
-                    if let Some(mut v) = self
-                        .store
-                        .inscription_db()
-                        .get(&UserOrdStats::get_db_key(&new_owner).unwrap())
-                        .map(|x| UserOrdStats::from_raw(&x).unwrap())
-                    {
-                        v.amount += inscription_extra.value.value;
-                        v.count += 1;
+                    if !stats_incremented.contains(&new_outpoint.outpoint) {
+                        stats_incremented.insert(new_outpoint.outpoint);
 
-                        to_write.push(v.to_db_row(&old_owner).unwrap());
+                        if let Some(mut v) = self
+                            .store
+                            .inscription_db()
+                            .get(&UserOrdStats::get_db_key(&new_owner).unwrap())
+                            .map(|x| UserOrdStats::from_raw(&x).unwrap())
+                        {
+                            v.amount += inscription_extra.value.value;
+                            v.count += 1;
+
+                            to_write.push(v.to_db_row(&old_owner).unwrap());
+                        }
                     }
 
                     token_cache.try_transfer(
