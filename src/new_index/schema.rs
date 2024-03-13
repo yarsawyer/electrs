@@ -261,8 +261,7 @@ impl Indexer {
             .temp_db()
             .get(b"ot")
             .map(|x| BlockHash::from_slice(&x).unwrap())
-            .map(|x| self.get_block_height(x))
-            .flatten()? as u32;
+            .and_then(|x| self.get_block_height(x))? as u32;
 
         let mut to_delete = vec![];
 
@@ -402,7 +401,7 @@ impl Indexer {
                     .map(|(outpoint, v)| {
                         TokenTransferKey::db_key(
                             &v.script_pubkey.to_address_str(Network::Bellscoin).unwrap(),
-                            outpoint.clone(),
+                            *outpoint,
                         )
                     })
                     .collect_vec();
@@ -414,20 +413,15 @@ impl Indexer {
                     .multi_get(keys.iter())
                     .into_iter()
                     .enumerate()
-                    .map(|(idx, v)| {
-                        if let Ok(v) = v {
-                            if let Some(v) = v {
-                                let key = TokenTransferKey::parse_db_key(keys[idx].clone());
-                                let value = TokenTransferValue::from_db_value(&v);
-                                Some((key.location, (key.owner, value.proto)))
-                            } else {
-                                None
-                            }
+                    .flat_map(|(idx, v)| {
+                        if let Ok(Some(v)) = v {
+                            let key = TokenTransferKey::parse_db_key(keys[idx].clone());
+                            let value = TokenTransferValue::from_db_value(&v);
+                            Some((key.location, (key.owner, value.proto)))
                         } else {
                             None
                         }
-                    })
-                    .flatten();
+                    });
 
                 token_cache.valid_transfers.extend(valid_transfers);
             }
@@ -852,7 +846,7 @@ impl ChainQuery {
             let txids = self.get_block_txids(hash).catch("")??;
 
             // Reconstruct the raw block using the header and txids,
-            // as <raw header><tx count varint><raw txs>
+            // as <raw header><tx count variant><raw txs>
             let mut raw = Vec::with_capacity(meta.size as usize);
 
             raw.append(&mut serialize(entry.header()));
@@ -981,7 +975,7 @@ impl ChainQuery {
     }
 
     // TODO: avoid duplication with stats/stats_delta?
-    pub fn utxo(&self, scripthash: &[u8], limit: usize, flush: DBFlush) -> Result<Vec<Utxo>> {
+    pub fn utxo(&self, scripthash: &[u8], flush: DBFlush) -> Result<Vec<Utxo>> {
         let _timer = self.start_timer("utxo");
         // get the last known utxo set and the blockhash it was updated for.
         // invalidates the cache if the block was orphaned.
@@ -1001,8 +995,8 @@ impl ChainQuery {
 
         // update utxo set with new transactions since
         let (newutxos, lastblock, processed_items) = cache.map_or_else(
-            || self.utxo_delta(scripthash, HashMap::new(), 0, limit),
-            |(oldutxos, blockheight)| self.utxo_delta(scripthash, oldutxos, blockheight + 1, limit),
+            || self.utxo_delta(scripthash, HashMap::new(), 0),
+            |(oldutxos, blockheight)| self.utxo_delta(scripthash, oldutxos, blockheight + 1),
         )?;
 
         // save updated utxo set to cache
@@ -1047,7 +1041,6 @@ impl ChainQuery {
         scripthash: &[u8],
         init_utxos: UtxoMap,
         start_height: usize,
-        limit: usize,
     ) -> Result<(UtxoMap, Option<BlockHash>, usize)> {
         let _timer = self.start_timer("utxo_delta");
         let history_iter = self
@@ -1096,13 +1089,6 @@ impl ChainQuery {
                         outpoint: history.get_funded_outpoint(),
                     });
                 }
-                #[cfg(feature = "liquid")]
-                TxHistoryInfo::Issuing(_)
-                | TxHistoryInfo::Burning(_)
-                | TxHistoryInfo::Pegin(_)
-                | TxHistoryInfo::Pegout(_) => {
-                    unreachable!();
-                }
             };
         }
 
@@ -1121,7 +1107,8 @@ impl ChainQuery {
                 let inscriptions = self
                     .ords(address.clone(), &OrdsSearcher::New(usize::MAX, None))
                     .into_iter()
-                    .flat_map(|x| x.into_iter().map(UtxoValue::from));
+                    .flat_map(|x| x.into_iter().map(UtxoValue::from))
+                    .unique_by(|x| (x.txid, x.vout));
 
                 let mut stats = UserOrdStats::default();
 
@@ -1400,22 +1387,6 @@ impl ChainQuery {
                     stats.spent_txo_count += 1;
                     stats.spent_txo_sum += info.value;
                 }
-
-                #[cfg(feature = "liquid")]
-                TxHistoryInfo::Funding(_) => {
-                    stats.funded_txo_count += 1;
-                }
-
-                #[cfg(feature = "liquid")]
-                TxHistoryInfo::Spending(_) => {
-                    stats.spent_txo_count += 1;
-                }
-
-                #[cfg(feature = "liquid")]
-                TxHistoryInfo::Issuing(_)
-                | TxHistoryInfo::Burning(_)
-                | TxHistoryInfo::Pegin(_)
-                | TxHistoryInfo::Pegout(_) => unreachable!(),
             }
 
             lastblock = Some(blockid.hash);
@@ -1828,16 +1799,6 @@ fn index_transaction(
         );
         rows.push(edge.into_row());
     }
-
-    // Index issued assets & native asset pegins/pegouts/burns
-    #[cfg(feature = "liquid")]
-    asset::index_confirmed_tx_assets(
-        tx,
-        confirmed_height,
-        iconfig.network,
-        iconfig.parent_network,
-        rows,
-    );
 }
 
 fn addr_search_row(spk: &Script, network: Network) -> Option<DBRow> {
@@ -2077,15 +2038,6 @@ pub struct SpendingInfo {
 pub enum TxHistoryInfo {
     Funding(FundingInfo),
     Spending(SpendingInfo),
-
-    #[cfg(feature = "liquid")]
-    Issuing(asset::IssuingInfo),
-    #[cfg(feature = "liquid")]
-    Burning(asset::BurningInfo),
-    #[cfg(feature = "liquid")]
-    Pegin(peg::PeginInfo),
-    #[cfg(feature = "liquid")]
-    Pegout(peg::PegoutInfo),
 }
 
 impl TxHistoryInfo {
@@ -2093,12 +2045,6 @@ impl TxHistoryInfo {
         match self {
             TxHistoryInfo::Funding(FundingInfo { txid, .. })
             | TxHistoryInfo::Spending(SpendingInfo { txid, .. }) => deserialize(txid),
-
-            #[cfg(feature = "liquid")]
-            TxHistoryInfo::Issuing(asset::IssuingInfo { txid, .. })
-            | TxHistoryInfo::Burning(asset::BurningInfo { txid, .. })
-            | TxHistoryInfo::Pegin(peg::PeginInfo { txid, .. })
-            | TxHistoryInfo::Pegout(peg::PegoutInfo { txid, .. }) => deserialize(txid),
         }
         .expect("cannot parse Txid")
     }
@@ -2174,11 +2120,6 @@ impl TxHistoryInfo {
                 txid: deserialize(&info.prev_txid).unwrap(),
                 vout: info.prev_vout as u32,
             },
-            #[cfg(feature = "liquid")]
-            TxHistoryInfo::Issuing(_)
-            | TxHistoryInfo::Burning(_)
-            | TxHistoryInfo::Pegin(_)
-            | TxHistoryInfo::Pegout(_) => unreachable!(),
         }
     }
 }
@@ -2308,7 +2249,7 @@ fn make_utxo_cache(utxos: &UtxoMap) -> CachedUtxoMap {
         .map(|(location, (blockid, value, number, inc_id))| {
             (
                 (location.outpoint.txid, location.outpoint.vout),
-                (blockid.height as u32, *value, *number, inc_id.clone()),
+                (blockid.height as u32, *value, *number, *inc_id),
             )
         })
         .collect()

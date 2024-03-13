@@ -30,11 +30,11 @@ impl Display for InscriptionId {
     }
 }
 
-impl Into<OutPoint> for InscriptionId {
-    fn into(self) -> OutPoint {
+impl From<InscriptionId> for OutPoint {
+    fn from(val: InscriptionId) -> Self {
         OutPoint {
-            txid: self.txid,
-            vout: self.index,
+            txid: val.txid,
+            vout: val.index,
         }
     }
 }
@@ -62,7 +62,7 @@ impl Display for ParseError {
         match self {
             Self::Character(c) => write!(f, "invalid character: '{c}'"),
             Self::Length(len) => write!(f, "invalid length: {len}"),
-            Self::Separator(c) => write!(f, "invalid seprator: `{c}`"),
+            Self::Separator(c) => write!(f, "invalid separator: `{c}`"),
             Self::Txid(err) => write!(f, "invalid txid: {err}"),
             Self::Index(err) => write!(f, "invalid index: {err}"),
         }

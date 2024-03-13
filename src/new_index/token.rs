@@ -235,11 +235,11 @@ impl TokenCache {
                 } => {
                     let proto = {
                         self.all_transfers
-                            .get(&transfer_location)
+                            .get(transfer_location)
                             .map(|x| Some(x.clone()))
                             .unwrap_or_else(|| {
                                 self.valid_transfers
-                                    .get(&transfer_location)
+                                    .get(transfer_location)
                                     .map(|x| Some(x.1.clone()))
                                     .unwrap_or(None)
                             })

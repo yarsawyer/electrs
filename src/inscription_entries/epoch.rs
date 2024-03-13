@@ -7,7 +7,7 @@ pub(crate) struct Epoch(pub(crate) u64);
 
 impl Epoch {
     pub(crate) const STARTING_SATS: [Sat; 8] = [
-        Sat(0 * COIN_VALUE as u128),
+        Sat(0u128),
         Sat(100000000000 * COIN_VALUE as u128),
         Sat(122500000000 * COIN_VALUE as u128),
         Sat(136250000000 * COIN_VALUE as u128),
@@ -33,7 +33,7 @@ impl Epoch {
 
     pub(crate) fn starting_sat(self) -> Sat {
         *Self::STARTING_SATS
-            .get(usize::from(self.0 as usize))
+            .get(self.0 as usize)
             .unwrap_or_else(|| Self::STARTING_SATS.last().unwrap())
     }
 

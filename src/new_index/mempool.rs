@@ -335,7 +335,7 @@ impl Mempool {
                 .filter(|x| !txid_val.contains(&x.txid()))
                 .collect_vec();
 
-            if value.len() > 0 {
+            if !value.is_empty() {
                 self.patrials.insert(value[0].txid(), value);
             }
         }
@@ -500,10 +500,7 @@ impl Mempool {
 
             // Index funding/spending history entries and spend edges
             for (scripthash, entry) in funding.chain(spending) {
-                self.history
-                    .entry(scripthash)
-                    .or_insert_with(Vec::new)
-                    .push(entry);
+                self.history.entry(scripthash).or_default().push(entry);
             }
             for (i, txi) in tx.input.iter().enumerate() {
                 self.edges.insert(txi.previous_output, (txid, i as u32));
@@ -524,7 +521,7 @@ impl Mempool {
 
         let prev_txid = chunk[0].input[0].previous_output.txid;
 
-        let mut mempool_partials = self.patrials.remove(&prev_txid).unwrap_or(vec![]);
+        let mut mempool_partials = self.patrials.remove(&prev_txid).unwrap_or_default();
 
         let db_partials = load_partials(
             self.chain.store(),

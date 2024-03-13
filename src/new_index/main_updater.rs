@@ -35,7 +35,7 @@ impl<'a> IndexHandler<'a> {
         let mut rest = vec![];
         let mut token_cache = TokenCache::default();
 
-        for (i, tx) in txs.into_iter().enumerate() {
+        for (i, tx) in txs.iter().enumerate() {
             if !Self::parse_inscriptions(
                 tx,
                 h,
@@ -189,12 +189,11 @@ impl<'a> IndexHandler<'a> {
             .flatten()
             .map(|x| x.map(|x| UserOrdStats::from_raw(&x).unwrap()))
             .zip(data.iter())
-            .map(|x| {
+            .filter_map(|x| {
                 let owner = x.1.owner.clone();
 
                 x.0.map(|z| (owner, z))
             })
-            .flatten()
             .collect();
 
         for inc in data {

@@ -6,10 +6,8 @@ pub use bitcoin::{
     Block, BlockHash, BlockHeader, OutPoint, Script, Transaction, TxIn, TxOut, Txid,
 };
 
-
 use bitcoin::blockdata::constants::genesis_block;
 pub use bitcoin::network::constants::Network as BNetwork;
-
 
 pub type Value = u64;
 
@@ -19,23 +17,18 @@ pub enum Network {
     Testnet,
 }
 
-
 impl Network {
     pub fn magic(self) -> u32 {
         BNetwork::from(self).magic()
     }
 
     pub fn names() -> Vec<String> {
-        return vec![
-            "mainnet".to_string(),
-            "testnet".to_string(),
-        ];
+        vec!["mainnet".to_string(), "testnet".to_string()]
     }
 }
 
 pub fn genesis_hash(network: Network) -> BlockHash {
-    return tidecoin_genesis_hash(network.into());
-
+    tidecoin_genesis_hash(network.into())
 }
 
 pub fn tidecoin_genesis_hash(network: BNetwork) -> bitcoin::BlockHash {

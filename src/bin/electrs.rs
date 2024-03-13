@@ -32,9 +32,6 @@ use electrs::{
     HEIGHT_DELAY,
 };
 
-#[cfg(feature = "liquid")]
-use electrs::elements::AssetRegistry;
-
 fn fetch_from(config: &Config, store: &Store) -> FetchFrom {
     let mut jsonrpc_import = config.jsonrpc_import;
     if !jsonrpc_import {
@@ -242,7 +239,7 @@ fn run_server(config: Arc<Config>) -> Result<()> {
                     .reorg_handler(removed, config.first_inscription_block)
                     .expect("Something went wrong with removing blocks");
                 token_cache.remove_token_actions(first_height);
-                inscription_updater.copy_to_next_block(first_height - 1 as u32)?;
+                inscription_updater.copy_to_next_block(first_height - 1_u32)?;
             }
 
             indexer

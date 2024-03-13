@@ -1,17 +1,16 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 use crate::config::{Config, VERSION_STRING};
 use crate::errors;
-use crate::inscription_entries::index::OUTPOINT_IS_INSCRIPTION;
-use crate::inscription_entries::inscription::{InscriptionExtraData, Location, OrdHistoryRow};
+use crate::inscription_entries::inscription::{InscriptionExtraData, Location};
 use crate::inscription_entries::InscriptionId;
 use crate::new_index::exchange_data::get_bells_price;
 use crate::new_index::schema::OrdsSearcher;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
 use crate::util::errors::UnwrapPrint;
 use crate::util::{
-    bincode_util, create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts,
-    get_tx_fee, has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId,
-    FullHash, ScriptToAddr, ScriptToAsm, TransactionStatus,
+    create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
+    has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
+    ScriptToAddr, ScriptToAsm, TransactionStatus,
 };
 
 use {bitcoin::consensus::encode, std::str::FromStr};
@@ -324,8 +323,8 @@ pub struct PreInscriptionMeta {
 
 #[derive(Serialize)]
 pub struct UtxoValue {
-    txid: Txid,
-    vout: u32,
+    pub txid: Txid,
+    pub vout: u32,
     status: TransactionStatus,
     pub value: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -881,7 +880,7 @@ fn handle_request(
                     last_seen_txid.map_or("txid is empty".to_owned(), |x| format!("error {}", x));
                 return Err(HttpError(StatusCode::UNPROCESSABLE_ENTITY, msg));
             };
-            let search = query_params.get("search").map(|x| x.clone());
+            let search = query_params.get("search").cloned();
             let searcher = OrdsSearcher::After(last_seen_txid, query.config().utxos_limit, search);
             let ords: Vec<UtxoValue> = query
                 .chain()
@@ -945,7 +944,7 @@ fn handle_request(
             None,
         ) => {
             to_scripthash(script_type, script_str, config.network_type)?;
-            let search = query_params.get("search").map(|x| x.clone());
+            let search = query_params.get("search").cloned();
             let searcher = OrdsSearcher::New(query.config().utxos_limit, search);
             let utxos: Vec<UtxoValue> = query
                 .chain()
@@ -1276,7 +1275,7 @@ fn handle_request(
             )
         }
         (&Method::GET, Some(&"ord"), Some(v), None, None, None) => {
-            let outpoint = InscriptionId::from_str(*v);
+            let outpoint = InscriptionId::from_str(v);
             if let Ok(outpoint) = outpoint {
                 let outpoint = OutPoint {
                     txid: outpoint.txid,

@@ -82,7 +82,7 @@ impl InscriptionUpdater {
 
                 to_temp_write.push(inscription_extra.to_temp_db_row(block_height, &prev_location)?);
 
-                let inputs_cum = InscriptionSearcher::calc_offsets(&tx, &txos).unwrap();
+                let inputs_cum = InscriptionSearcher::calc_offsets(&tx, txos).unwrap();
 
                 let Result::Ok((vout, offset)) = InscriptionSearcher::get_output_index_by_input(
                     inputs_cum
@@ -135,7 +135,7 @@ impl InscriptionUpdater {
 
                 // Work with new user
                 let ord_history = {
-                    let new_owner = tx.output[0]
+                    let new_owner = tx.output[vout as usize]
                         .script_pubkey
                         .to_address_str(crate::chain::Network::Bellscoin)
                         .anyhow_as("No owner :(")?;
@@ -296,10 +296,8 @@ impl InscriptionUpdater {
     }
 
     pub fn chain_mempool_inscriptions(txs: &Vec<Transaction>) -> Vec<Vec<Transaction>> {
-        let mut chain: HashMap<Txid, Vec<Transaction>> = txs
-            .into_iter()
-            .map(|x| (x.txid(), vec![x.clone()]))
-            .collect();
+        let mut chain: HashMap<Txid, Vec<Transaction>> =
+            txs.iter().map(|x| (x.txid(), vec![x.clone()])).collect();
 
         for tx in txs {
             let prev_txid = tx.input[0].previous_output.txid;
@@ -323,7 +321,7 @@ impl InscriptionUpdater {
         txos: &HashMap<OutPoint, TxOut>,
     ) -> Result<()> {
         let inputs_cum = {
-            let inputs = InscriptionSearcher::calc_offsets(&tx, &txos);
+            let inputs = InscriptionSearcher::calc_offsets(tx, txos);
             if inputs.is_none() {
                 return Ok(());
             }
@@ -365,10 +363,11 @@ impl InscriptionUpdater {
     }
 
     pub fn copy_from_main_block(&self, block_height: u32) -> anyhow::Result<()> {
-        if let Some(_) = self
+        if self
             .store
             .temp_db()
             .get(&LastInscriptionNumber::get_temp_db_key(block_height))
+            .is_some()
         {
             return Ok(());
         }
@@ -491,7 +490,7 @@ impl InscriptionUpdater {
 
                         // Extra data to restore
                         {
-                            self.store.temp_db().db.delete(&key).unwrap();
+                            self.store.temp_db().db.delete(key).unwrap();
                             to_restore.push(extra.to_db_row().unwrap());
                         }
 
@@ -726,9 +725,9 @@ pub fn load_txos(tx_db: &DB, txs: &[Transaction]) -> HashMap<OutPoint, TxOut> {
         .iter()
         .flatten()
         .flatten()
-        .map(|x| bitcoin::consensus::deserialize::<TxOut>(&x).expect("failed to parse TxOut"))
+        .map(|x| bitcoin::consensus::deserialize::<TxOut>(x).expect("failed to parse TxOut"))
         .zip(keys_iter)
-        .map(|x| (x.1.clone(), x.0))
+        .map(|x| (x.1, x.0))
         .collect()
 }
 

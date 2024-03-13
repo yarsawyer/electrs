@@ -198,7 +198,7 @@ impl<'a> MoveIndexer<'a> {
 
         let keys = {
             let mut keys = data.values().map(|x| &x.data.value.owner).collect_vec();
-            keys.extend(data.values().map(|x| &x.new_owner).flatten());
+            keys.extend(data.values().flat_map(|x| &x.new_owner));
 
             keys.into_iter().unique().collect_vec()
         };
@@ -207,17 +207,16 @@ impl<'a> MoveIndexer<'a> {
             .store
             .inscription_db()
             .db
-            .multi_get(keys.iter().map(|x| UserOrdStats::get_db_key(&x).unwrap()))
+            .multi_get(keys.iter().map(|x| UserOrdStats::get_db_key(x).unwrap()))
             .into_iter()
             .flatten()
             .map(|x| x.map(|x| UserOrdStats::from_raw(&x).unwrap()))
             .zip(keys)
-            .map(|x| {
+            .filter_map(|x| {
                 let owner = x.1.clone();
 
                 x.0.map(|z| (owner, z))
             })
-            .flatten()
             .collect();
 
         for (new_location, mut inc) in data {

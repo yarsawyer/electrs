@@ -85,7 +85,7 @@ impl OrdHistoryValue {
         bincode_util::serialize_big(self).unwrap()
     }
 
-    pub fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
+    pub fn from_raw(value: &[u8]) -> anyhow::Result<Self> {
         bincode_util::deserialize_big(value).anyhow_as("Failed to deserialize OrdHistoryValue")
     }
 }
@@ -155,7 +155,7 @@ impl OrdHistoryRow {
         }
     }
 
-    pub fn value_from_raw(value: &Vec<u8>) -> OrdHistoryValue {
+    pub fn value_from_raw(value: &[u8]) -> OrdHistoryValue {
         OrdHistoryValue::from_raw(value).unwrap()
     }
 
@@ -202,7 +202,7 @@ impl UserOrdStats {
         Self { amount, count }
     }
 
-    pub fn from_raw(value: &Vec<u8>) -> anyhow::Result<Self> {
+    pub fn from_raw(value: &[u8]) -> anyhow::Result<Self> {
         bincode_util::deserialize_big(value).anyhow_as("Cannot deserialize UserOrdStats")
     }
 
@@ -382,7 +382,7 @@ impl PartialTxs {
         let txs: Vec<Txid> = value
             .value
             .chunks(32)
-            .map(|x| Txid::from_slice(x))
+            .map(Txid::from_slice)
             .try_collect()
             .anyhow_as("Failed to decode transactions")?;
 
@@ -454,7 +454,7 @@ impl PartialTxs {
         let txs: Vec<Txid> = row
             .value
             .chunks(32)
-            .map(|x| Txid::from_slice(x))
+            .map(Txid::from_slice)
             .try_collect()
             .anyhow_as("Failed to decode transactions")?;
 
@@ -481,11 +481,11 @@ impl Inscription {
 
     pub fn from_transactions(txs: &[&Transaction]) -> ParsedInscription {
         let mut sig_scripts = Vec::with_capacity(txs.len());
-        for i in 0..txs.len() {
-            if txs[i].input.is_empty() {
+        for tx in txs {
+            if tx.input.is_empty() {
                 return ParsedInscription::None;
             }
-            sig_scripts.push(txs[i].input[0].script_sig.clone());
+            sig_scripts.push(tx.input[0].script_sig.clone());
         }
         InscriptionParser::parse(sig_scripts)
     }
@@ -714,7 +714,7 @@ impl InscriptionParser {
                 if bytes.len() < 3 {
                     return None;
                 }
-                let len = ((bytes[1] as usize) << 8) + ((bytes[0] as usize) << 0);
+                let len = ((bytes[1] as usize) << 8) + (bytes[0] as usize);
                 if bytes.len() < 3 + len {
                     return None;
                 }
@@ -731,7 +731,7 @@ impl InscriptionParser {
                 let len = ((bytes[3] as usize) << 24)
                     + ((bytes[2] as usize) << 16)
                     + ((bytes[1] as usize) << 8)
-                    + ((bytes[0] as usize) << 0);
+                    + (bytes[0] as usize);
                 if bytes.len() < 5 + len {
                     return None;
                 }
@@ -747,7 +747,7 @@ impl InscriptionParser {
     }
 
     fn push_data_to_number(data: &[u8]) -> Option<u64> {
-        if data.len() == 0 {
+        if data.is_empty() {
             return Some(0);
         }
 
@@ -758,12 +758,12 @@ impl InscriptionParser {
         let mut n: u64 = 0;
         let mut m: u64 = 0;
 
-        for i in 0..data.len() {
-            n += (data[i] as u64) << m;
+        for i in data {
+            n += (*i as u64) << m;
             m += 8;
         }
 
-        return Some(n);
+        Some(n)
     }
 }
 
@@ -844,13 +844,12 @@ pub fn update_last_block_number(
         false => store.inscription_db(),
     };
 
-    let block_entry = store
+    let block_entry = *store
         .indexed_headers
         .read()
         .header_by_height(block_height as usize)
         .anyhow_as("Header by height not found")?
-        .hash()
-        .clone();
+        .hash();
 
     let prev_block_height = {
         if let Some(ot) = db.get(b"ot") {
@@ -909,7 +908,7 @@ impl Location {
     }
 
     pub fn from_hex(value: &str) -> anyhow::Result<Self> {
-        let items = value.split(":").collect_vec();
+        let items = value.split(':').collect_vec();
 
         if items.len() != 3 {
             anyhow::bail!("Invalid location format");
@@ -933,13 +932,13 @@ impl Location {
         ))
         .anyhow_as("Cannot serialize Location")
     }
+}
 
-    pub fn to_string(&self) -> String {
+impl ToString for Location {
+    fn to_string(&self) -> String {
         format!(
             "{}i{}i{}",
-            self.outpoint.txid.to_string(),
-            self.outpoint.vout,
-            self.offset
+            self.outpoint.txid, self.outpoint.vout, self.offset
         )
     }
 }
@@ -1026,9 +1025,9 @@ impl LeakedInscriptions {
             Some(self.coinbase_tx.output.iter().map(|x| x.value).sum::<u64>() - self.total_amount);
     }
 
-    pub fn get_leaked_inscriptions<'a>(
-        &'a mut self,
-    ) -> impl Iterator<Item = (Location, MovedInscription)> + 'a {
+    pub fn get_leaked_inscriptions(
+        &mut self,
+    ) -> impl Iterator<Item = (Location, MovedInscription)> + '_ {
         self.update_reward();
 
         self.inscriptions

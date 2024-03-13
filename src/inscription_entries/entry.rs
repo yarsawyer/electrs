@@ -102,8 +102,7 @@ impl Entry for OutPoint {
 
     fn store(self) -> Result<Self::Value> {
         let mut value = [0; 36];
-        self.consensus_encode(&mut value.as_mut_slice())
-            .track_err()?;
+        self.consensus_encode(value.as_mut_slice()).track_err()?;
         Ok(value)
     }
 }
@@ -119,8 +118,7 @@ impl Entry for SatPoint {
 
     fn store(self) -> Result<Self::Value> {
         let mut value = [0; 44];
-        self.consensus_encode(&mut value.as_mut_slice())
-            .track_err()?;
+        self.consensus_encode(value.as_mut_slice()).track_err()?;
         Ok(value)
     }
 }
@@ -144,7 +142,7 @@ impl Entry for SatRange {
 
     fn store(self) -> Result<Self::Value> {
         let start = self.0;
-        let range = u64::from((self.1 - self.0) as u64);
+        let range = (self.1 - self.0) as u64;
         let start_bytes = u128::to_le_bytes(start);
         let range_bytes = u64::to_le_bytes(range);
         let mut out = [0_u8; 24];

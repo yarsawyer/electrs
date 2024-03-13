@@ -1,4 +1,4 @@
-use super::{decimal::Decimal, rarity::Rarity, *};
+use super::*;
 use anyhow::bail;
 use std::convert::TryFrom;
 
@@ -26,14 +26,6 @@ impl Sat {
 
     pub(crate) fn epoch_position(self) -> u128 {
         self.0 - self.epoch().starting_sat().0
-    }
-
-    pub(crate) fn decimal(self) -> Decimal {
-        self.into()
-    }
-
-    pub(crate) fn rarity(self) -> Rarity {
-        self.into()
     }
 
     pub(crate) fn is_common(self) -> bool {
