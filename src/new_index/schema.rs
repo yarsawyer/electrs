@@ -48,10 +48,12 @@ const MIN_HISTORY_ITEMS_TO_CACHE: usize = 50;
 
 type Limit = usize;
 type SearchInscriptionNumber = Option<String>;
+type Size = Option<u64>;
 
 pub enum OrdsSearcher {
     After(Location, Limit, SearchInscriptionNumber),
     New(Limit, SearchInscriptionNumber),
+    Offset(Size),
 }
 
 pub struct Store {
@@ -1304,6 +1306,16 @@ impl ChainQuery {
                         None => true,
                     });
                 self.ords_iter(history_iter, *limit)
+            }
+            OrdsSearcher::Offset(size) => {
+                let history_iter = self
+                    .ord_iter_scan_reverse(scripthash)
+                    .map(OrdHistoryRow::from_row)
+                    .filter(|x| match size {
+                        Some(v) => &x.key.location.offset >= v,
+                        None => x.key.location.offset > 0,
+                    });
+                self.ords_iter(history_iter, usize::MAX)
             }
         }
     }

@@ -1329,6 +1329,24 @@ fn handle_request(
                 0,
             )
         }
+        (
+            &Method::GET,
+            Some(&"offset_ords"),
+            Some(script_type @ &"address"),
+            Some(script_str),
+            None,
+            None,
+        ) => {
+            to_scripthash(script_type, script_str, config.network_type)?;
+            let ords: Vec<UtxoValue> = query
+                .chain()
+                .ords(script_str.to_string(), &OrdsSearcher::Offset(None))
+                .map_err(|_| "Unexpected error".to_owned())?
+                .into_iter()
+                .map(UtxoValue::from)
+                .collect();
+            json_response(json!({"ords": ords}), 0)
+        }
 
         _ => Err(HttpError::not_found(format!(
             "endpoint does not exist {:?}",
