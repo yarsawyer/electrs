@@ -344,35 +344,24 @@ impl From<Utxo> for UtxoValue {
 }
 
 #[derive(Serialize)]
-struct OffsetPoint {
-    start: u64,
-    end: u64,
-}
-
-#[derive(Serialize, Default)]
-struct OrdOffset {
-    available_to_free: u64,
-    offsets: Vec<OffsetPoint>,
-}
-
-#[derive(Serialize)]
 struct OrdsOffsetValue {
     txid: Txid,
     vout: u32,
     value: u64,
     status: TransactionStatus,
-    #[serde(flatten)]
-    offsets: OrdOffset,
+    inscriptions: Vec<u64>,
+    available_to_free: u64,
 }
 
 impl From<UtxoValue> for OrdsOffsetValue {
     fn from(value: UtxoValue) -> Self {
         Self {
             status: value.status,
-            offsets: OrdOffset::default(),
+            inscriptions: Vec::new(),
             txid: value.txid,
             vout: value.vout,
             value: value.value,
+            available_to_free: 0,
         }
     }
 }
@@ -1393,22 +1382,16 @@ fn handle_request(
 
                     for v in v {
                         let offset = v.inscription_meta.unwrap().offset;
+
+                        res.inscriptions.push(offset);
                         if offset - prev_offset > 100_000 {
-                            res.offsets.offsets.push(OffsetPoint {
-                                start: prev_offset + 100_000,
-                                end: offset,
-                            });
-                            res.offsets.available_to_free += offset - (prev_offset + 100_000);
+                            res.available_to_free += offset - (prev_offset + 100_000);
                         }
                         prev_offset = offset;
                     }
 
                     if last_item.value - last_offset > 100_000 {
-                        res.offsets.offsets.push(OffsetPoint {
-                            start: last_offset + 100_000,
-                            end: last_item.value,
-                        });
-                        res.offsets.available_to_free += last_item.value - (last_offset + 100_000);
+                        res.available_to_free += last_item.value - (last_offset + 100_000);
                     }
 
                     res
