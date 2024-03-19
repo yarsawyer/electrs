@@ -53,7 +53,7 @@ type Size = Option<u64>;
 pub enum OrdsSearcher {
     After(Location, Limit, SearchInscriptionNumber),
     New(Limit, SearchInscriptionNumber),
-    Offset(Size),
+    Offset,
 }
 
 pub struct Store {
@@ -1225,6 +1225,12 @@ impl ChainQuery {
         };
 
         for ((location, (blockid, inc_number, inc_id)), extra) in newutxos.into_iter().zip(extras) {
+            if let OrdsSearcher::Offset = searcher {
+                if extra.value == 100_000 {
+                    continue;
+                }
+            }
+
             values.push(Utxo {
                 txid: location.outpoint.txid,
                 vout: location.outpoint.vout,
@@ -1307,14 +1313,10 @@ impl ChainQuery {
                     });
                 self.ords_iter(history_iter, *limit)
             }
-            OrdsSearcher::Offset(size) => {
+            OrdsSearcher::Offset => {
                 let history_iter = self
                     .ord_iter_scan_reverse(scripthash)
-                    .map(OrdHistoryRow::from_row)
-                    .filter(|x| match size {
-                        Some(v) => &x.key.location.offset >= v,
-                        None => x.key.location.offset > 0,
-                    });
+                    .map(OrdHistoryRow::from_row);
                 self.ords_iter(history_iter, usize::MAX)
             }
         }

@@ -306,7 +306,7 @@ fn is_bare_multisig(script: &Script) -> bool {
         && script[0] <= script[len - 2]
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct InscriptionMeta {
     pub content_type: String,
     pub content_length: usize,
@@ -321,7 +321,7 @@ pub struct PreInscriptionMeta {
     pub value: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct UtxoValue {
     pub txid: Txid,
     pub vout: u32,
@@ -339,6 +339,40 @@ impl From<Utxo> for UtxoValue {
             status: TransactionStatus::from(utxo.confirmed),
             value: utxo.value,
             inscription_meta: utxo.inscription_meta,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct OffsetPoint {
+    start: u64,
+    end: u64,
+}
+
+#[derive(Serialize, Default)]
+struct OrdOffset {
+    available_to_free: u64,
+    offsets: Vec<OffsetPoint>,
+}
+
+#[derive(Serialize)]
+struct OrdsOffsetValue {
+    txid: Txid,
+    vout: u32,
+    value: u64,
+    status: TransactionStatus,
+    #[serde(flatten)]
+    offsets: OrdOffset,
+}
+
+impl From<UtxoValue> for OrdsOffsetValue {
+    fn from(value: UtxoValue) -> Self {
+        Self {
+            status: value.status,
+            offsets: OrdOffset::default(),
+            txid: value.txid,
+            vout: value.vout,
+            value: value.value,
         }
     }
 }
@@ -1340,11 +1374,46 @@ fn handle_request(
             to_scripthash(script_type, script_str, config.network_type)?;
             let ords: Vec<UtxoValue> = query
                 .chain()
-                .ords(script_str.to_string(), &OrdsSearcher::Offset(None))
+                .ords(script_str.to_string(), &OrdsSearcher::Offset)
                 .map_err(|_| "Unexpected error".to_owned())?
                 .into_iter()
                 .map(UtxoValue::from)
                 .collect();
+            let ords = ords
+                .into_iter()
+                .group_by(|x| (x.txid, x.vout))
+                .into_iter()
+                .map(|(_, v)| {
+                    let v = v.collect_vec();
+                    let last_item = v.last().unwrap().clone();
+                    let last_offset = last_item.inscription_meta.clone().unwrap().offset;
+                    let mut prev_offset = 0;
+
+                    let mut res = OrdsOffsetValue::from(last_item.clone());
+
+                    for v in v {
+                        let offset = v.inscription_meta.unwrap().offset;
+                        if offset - prev_offset > 100_000 {
+                            res.offsets.offsets.push(OffsetPoint {
+                                start: prev_offset + 100_000,
+                                end: offset,
+                            });
+                            res.offsets.available_to_free += offset - (prev_offset + 100_000);
+                        }
+                        prev_offset = offset;
+                    }
+
+                    if last_item.value - last_offset > 100_000 {
+                        res.offsets.offsets.push(OffsetPoint {
+                            start: last_offset + 100_000,
+                            end: last_item.value,
+                        });
+                        res.offsets.available_to_free += last_item.value - (last_offset + 100_000);
+                    }
+
+                    res
+                })
+                .collect_vec();
             json_response(json!({"ords": ords}), 0)
         }
 

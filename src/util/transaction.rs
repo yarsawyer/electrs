@@ -4,8 +4,7 @@ use crate::util::BlockId;
 
 use std::collections::HashMap;
 
-
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TransactionStatus {
     pub confirmed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,7 +189,6 @@ pub(super) mod sigops {
     }
 
     fn get_p2sh_sigop_count(tx: &Transaction, previous_outputs: &[&TxOut]) -> usize {
-
         if tx.is_coin_base() {
             return 0;
         }
