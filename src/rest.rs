@@ -349,7 +349,7 @@ struct OrdsOffsetValue {
     vout: u32,
     value: u64,
     status: TransactionStatus,
-    inscriptions: Vec<u64>,
+    inscriptions: Vec<InscriptionMeta>,
     available_to_free: u64,
 }
 
@@ -1381,9 +1381,9 @@ fn handle_request(
                     let mut res = OrdsOffsetValue::from(last_item.clone());
 
                     for v in v {
-                        let offset = v.inscription_meta.unwrap().offset;
-
-                        res.inscriptions.push(offset);
+                        let inscription_meta: InscriptionMeta = v.inscription_meta.unwrap();
+                        let offset = inscription_meta.offset;
+                        res.inscriptions.push(inscription_meta);
                         if offset - prev_offset > 100_000 {
                             res.available_to_free += offset - (prev_offset + 100_000);
                         }
