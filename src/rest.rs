@@ -351,6 +351,7 @@ struct OrdsOffsetValue {
     status: TransactionStatus,
     inscriptions: Vec<InscriptionMeta>,
     available_to_free: u64,
+    raw_hex: String,
 }
 
 impl From<UtxoValue> for OrdsOffsetValue {
@@ -362,6 +363,7 @@ impl From<UtxoValue> for OrdsOffsetValue {
             vout: value.vout,
             value: value.value,
             available_to_free: 0,
+            raw_hex: String::from(""),
         }
     }
 }
@@ -1393,6 +1395,9 @@ fn handle_request(
                     if last_item.value - last_offset > 100_000 {
                         res.available_to_free += last_item.value - (last_offset + 100_000);
                     }
+
+                    let rawtx = query.lookup_raw_txn(&last_item.txid).unwrap();
+                    res.raw_hex = hex::encode(rawtx);
 
                     res
                 })
