@@ -161,7 +161,8 @@ impl InscriptionUpdater {
                             .get(&UserOrdStats::get_db_key(&new_owner).unwrap())
                             .map(|x| UserOrdStats::from_raw(&x).unwrap())
                         {
-                            v.amount += inscription_extra.value.value;
+                            //v.amount += inscription_extra.value.value;
+                            v.amount += tx.output[vout as usize].value;
                             v.count += 1;
 
                             to_write.push(v.to_db_row(&old_owner).unwrap());
@@ -179,6 +180,7 @@ impl InscriptionUpdater {
                 };
 
                 inscription_extra.location = new_outpoint;
+                inscription_extra.value.value = tx.output[vout as usize].value;
 
                 to_write.push(ord_history.to_db_row());
                 to_write.push(inscription_extra.to_db_row()?);

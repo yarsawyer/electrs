@@ -45,6 +45,7 @@ const TTL_LONG: u32 = 157_784_630; // ttl for static resources (5 years)
 const TTL_SHORT: u32 = 10; // ttl for volatie resources
 const TTL_MEMPOOL_RECENT: u32 = 5; // ttl for GET /mempool/recent
 const CONF_FINAL: usize = 10; // reorgs deeper than this are considered unlikely
+const ORD_MIN_VALUE: u64 = 100_000;
 
 #[derive(Serialize, Deserialize)]
 struct BlockValue {
@@ -1372,6 +1373,7 @@ fn handle_request(
                 .collect();
             let ords = ords
                 .into_iter()
+                .filter(|x| x.value > ORD_MIN_VALUE)
                 .group_by(|x| (x.txid, x.vout))
                 .into_iter()
                 .map(|(_, v)| {
@@ -1386,14 +1388,14 @@ fn handle_request(
                         let inscription_meta: InscriptionMeta = v.inscription_meta.unwrap();
                         let offset = inscription_meta.offset;
                         res.inscriptions.push(inscription_meta);
-                        if offset - prev_offset > 100_000 {
-                            res.available_to_free += offset - (prev_offset + 100_000);
+                        if offset - prev_offset > ORD_MIN_VALUE {
+                            res.available_to_free += offset - (prev_offset + ORD_MIN_VALUE);
                         }
                         prev_offset = offset;
                     }
 
-                    if last_item.value - last_offset > 100_000 {
-                        res.available_to_free += last_item.value - (last_offset + 100_000);
+                    if last_item.value - last_offset > ORD_MIN_VALUE {
+                        res.available_to_free += last_item.value - (last_offset + ORD_MIN_VALUE);
                     }
 
                     let rawtx = query.lookup_raw_txn(&last_item.txid).unwrap();
